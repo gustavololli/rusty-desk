@@ -147,6 +147,7 @@ impl RustyDeskApp {
         );
 
         sfx::play(SfxEvent::Startup, config.sfx_enabled);
+        apply_platform_always_on_top(true);
 
         Self {
             rt: tokio::runtime::Runtime::new().expect("No se pudo iniciar Tokio"),
@@ -947,23 +948,17 @@ impl RustyDeskApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_size));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
 
-        let level = match target {
-            WindowMode::Pet => {
-                if self.config.pet.always_on_top {
-                    egui::WindowLevel::AlwaysOnTop
-                } else {
-                    egui::WindowLevel::Normal
-                }
-            }
-            _ => {
-                if self.always_on_top {
-                    egui::WindowLevel::AlwaysOnTop
-                } else {
-                    egui::WindowLevel::Normal
-                }
-            }
+        let want_on_top = match target {
+            WindowMode::Pet => self.config.pet.always_on_top,
+            _ => self.always_on_top,
+        };
+        let level = if want_on_top {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+        apply_platform_always_on_top(want_on_top);
 
         if target == WindowMode::Pet {
             if let Some(pos) = self.config.pet.pet_pos {
@@ -1162,6 +1157,7 @@ impl eframe::App for RustyDeskApp {
                                     egui::WindowLevel::Normal
                                 };
                                 ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+                                apply_platform_always_on_top(self.always_on_top);
                             }
                         });
                     });
@@ -2862,6 +2858,76 @@ impl RustyDeskApp {
     }
 }
 
+fn merge_kwin_rules_list(existing: &str, rule_id: &str) -> String {
+    let mut parts: Vec<&str> = existing
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !parts.contains(&rule_id) {
+        parts.push(rule_id);
+    }
+    parts.join(",")
+}
+
+/// On KDE Plasma Wayland, `winit`'s `WindowLevel::AlwaysOnTop` is a no-op because
+/// `xdg-shell` does not expose always-on-top to clients. Sync a KWin window rule
+/// asynchronously so KWin keeps Rusty-Desk above other windows when requested.
+fn apply_platform_always_on_top(enabled: bool) {
+    let is_wayland = std::env::var("XDG_SESSION_TYPE")
+        .map(|v| v.eq_ignore_ascii_case("wayland"))
+        .unwrap_or(false)
+        || std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let is_kde = std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|v| v.to_ascii_uppercase().contains("KDE"))
+        .unwrap_or(false);
+
+    if !is_wayland || !is_kde {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        use std::process::Command;
+
+        const RULE_ID: &str = "rusty-desk-always-on-top";
+        let rules_path = directories::BaseDirs::new()
+            .map(|b| b.config_dir().join("kwinrulesrc"))
+            .unwrap_or_else(|| PathBuf::from("kwinrulesrc"));
+
+        let existing_rules = std::fs::read_to_string(&rules_path)
+            .ok()
+            .and_then(|raw| {
+                raw.lines()
+                    .find_map(|line| line.strip_prefix("rules=").map(str::to_string))
+            })
+            .unwrap_or_default();
+        let merged_rules = merge_kwin_rules_list(&existing_rules, RULE_ID);
+        let above_val = if enabled { "true" } else { "false" };
+
+        let writes = [
+            ("General", "rules", merged_rules.as_str()),
+            (RULE_ID, "Description", "Rusty-Desk Always On Top"),
+            (RULE_ID, "title", "Rusty-Desk"),
+            (RULE_ID, "titlematch", "1"),
+            (RULE_ID, "above", above_val),
+            (RULE_ID, "aboverule", "2"),
+        ];
+
+        for (group, key, val) in writes {
+            let status = Command::new("kwriteconfig6")
+                .args(["--file", "kwinrulesrc", "--group", group, "--key", key, val])
+                .status();
+            if status.is_err() {
+                return;
+            }
+        }
+
+        let _ = Command::new("qdbus6")
+            .args(["org.kde.KWin", "/KWin", "reconfigure"])
+            .status();
+    });
+}
+
 fn query_x11_screen_bounds() -> Option<(f32, f32, f32, f32)> {
     use x11rb::connection::Connection;
     let (conn, screen_num) = x11rb::connect(None).ok()?;
@@ -2897,4 +2963,25 @@ fn spawn_global_cursor_tracker() -> Arc<Mutex<Option<(i16, i16)>>> {
         }
     });
     pos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_kwin_rules_list;
+
+    #[test]
+    fn merge_kwin_rules_preserves_existing_and_avoids_duplicates() {
+        assert_eq!(
+            merge_kwin_rules_list("", "rusty-desk-always-on-top"),
+            "rusty-desk-always-on-top"
+        );
+        assert_eq!(
+            merge_kwin_rules_list("rule1, rule2", "rusty-desk-always-on-top"),
+            "rule1,rule2,rusty-desk-always-on-top"
+        );
+        assert_eq!(
+            merge_kwin_rules_list("rule1,rusty-desk-always-on-top", "rusty-desk-always-on-top"),
+            "rule1,rusty-desk-always-on-top"
+        );
+    }
 }
