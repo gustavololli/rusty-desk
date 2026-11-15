@@ -2,6 +2,7 @@ mod ai;
 mod config;
 mod converter;
 mod organizer;
+mod persistence;
 mod sfx;
 mod state;
 mod tools;

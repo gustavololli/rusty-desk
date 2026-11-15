@@ -7,11 +7,16 @@ use crate::ai::{
 use crate::config::AppConfig;
 use crate::converter::{self, CompactionMode};
 use crate::organizer::FileOrganizer;
+use crate::persistence::{ConversationSummary, MessageKind};
 use crate::sfx::{self, SfxEvent};
 use crate::state::{
-    AppData, AssistantMood, HabitItem, PomodoroPhase, SavedChatSession, TaskItem, UiChatEntry,
+    format_local_datetime_from_utc, AppData, AssistantMood, HabitItem, PomodoroPhase, TaskItem,
+    UiChatEntry,
 };
-use crate::tools::{execute_tool, tool_definitions};
+use crate::tools::{
+    parse_local_command, select_tools_for_message, ExecutionSource, LocalCommand,
+    PendingConfirmation, ToolEngine, ToolRequest, ToolStatus,
+};
 use crate::ui::avatar::draw_avatar;
 use crate::ui::icons8bit::{paint_pixel_icon, pixel_button, PixelIcon};
 use crate::voice::{speak_local_async, ActiveRecording};
@@ -74,6 +79,8 @@ pub struct RustyDeskApp {
     is_thinking: bool,
     current_chat_id: String,
     show_chat_history: bool,
+    history_page: usize,
+    pending_confirmation: Option<PendingConfirmation>,
     system_prompt: String,
     welcome_text: String,
 
@@ -107,7 +114,12 @@ impl RustyDeskApp {
         configure_theme(&cc.egui_ctx);
 
         let config = AppConfig::load();
-        let data = AppData::load();
+        let mut data = AppData::load();
+        let initial_banner = data
+            .startup_error
+            .take()
+            .map(|e| format!("⚠️ {e}"))
+            .or_else(|| data.migration_notice.take());
         let (bg_tx, bg_rx) = mpsc::channel();
         let global_cursor = spawn_global_cursor_tracker();
 
@@ -141,13 +153,15 @@ impl RustyDeskApp {
             is_thinking: false,
             current_chat_id: Uuid::new_v4().to_string(),
             show_chat_history: false,
+            history_page: 0,
+            pending_confirmation: None,
             system_prompt,
             welcome_text: welcome,
             new_task_input: String::new(),
             new_habit_name: String::new(),
             new_habit_icon: "✨".to_string(),
             new_habit_goal: 1,
-            status_banner: None,
+            status_banner: initial_banner,
             active_recording: None,
             last_pomodoro_tick: Instant::now(),
             md_is_converting: false,
@@ -200,27 +214,119 @@ impl RustyDeskApp {
         }
     }
 
+    fn report_persistence_result<T>(&mut self, res: anyhow::Result<T>) {
+        if let Err(e) = res {
+            self.status_banner = Some(format!("⚠️ Error de persistencia SQLite: {e}"));
+        }
+    }
+
     fn send_user_message(&mut self, text: String, ctx: &egui::Context) {
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() || self.is_thinking {
             return;
         }
 
+        let user_msg = ChatMessage::user(&trimmed);
         self.chat_ui.push(UiChatEntry::user(&trimmed));
-        self.chat_history.push(ChatMessage::user(&trimmed));
-        self.data
-            .upsert_chat_session(&self.current_chat_id, &self.chat_ui);
-        self.is_thinking = true;
-        self.mood = AssistantMood::Thinking;
+        self.chat_history.push(user_msg.clone());
+        let persist_res = self.data.record_chat_message(
+            &self.current_chat_id,
+            Some(&trimmed),
+            &user_msg,
+            MessageKind::Text,
+        );
+        self.report_persistence_result(persist_res);
         sfx::play(SfxEvent::MessageSent, self.config.sfx_enabled);
 
-        self.spawn_ai_turn(ctx.clone());
+        // Intercept explicit `/` commands locally (0 LLM tokens!)
+        if let Some(local_cmd) = parse_local_command(&trimmed) {
+            match local_cmd {
+                LocalCommand::Help(help_text) => {
+                    let reply = ChatMessage::assistant_text(&help_text);
+                    self.chat_ui.push(UiChatEntry::assistant(&help_text));
+                    self.chat_history.push(reply.clone());
+                    let r = self.data.record_chat_message(
+                        &self.current_chat_id,
+                        None,
+                        &reply,
+                        MessageKind::Text,
+                    );
+                    self.report_persistence_result(r);
+                }
+                LocalCommand::Invalid(err_text) => {
+                    let msg = format!("⚠️ {err_text}");
+                    let reply = ChatMessage::assistant_text(&msg);
+                    self.chat_ui.push(UiChatEntry::assistant(&msg));
+                    self.chat_history.push(reply.clone());
+                    let r = self.data.record_chat_message(
+                        &self.current_chat_id,
+                        None,
+                        &reply,
+                        MessageKind::Text,
+                    );
+                    self.report_persistence_result(r);
+                }
+                LocalCommand::Tool { name, args } => {
+                    let out = ToolEngine::execute(
+                        ToolRequest {
+                            tool_name: name.to_string(),
+                            args,
+                            source: ExecutionSource::LocalCommand,
+                            conversation_id: Some(self.current_chat_id.clone()),
+                            tool_call_id: None,
+                            approved_confirmation_token: None,
+                        },
+                        &mut self.data,
+                        &mut self.organizer,
+                        &self.config,
+                    );
+                    if let Some(m) = out.mood {
+                        self.mood = m;
+                    }
+                    match out.status {
+                        ToolStatus::NeedsConfirmation(pending) => {
+                            let msg = format!("Confirmación requerida: {}", pending.summary);
+                            self.pending_confirmation = Some(pending);
+                            let reply = ChatMessage::assistant_text(&msg);
+                            self.chat_ui.push(UiChatEntry::assistant(&msg));
+                            self.chat_history.push(reply);
+                        }
+                        _ => {
+                            let reply_text = if out.status == ToolStatus::Error {
+                                format!("⚠️ {}", out.ui_message)
+                            } else {
+                                out.ui_message
+                            };
+                            let reply = ChatMessage::assistant_text(&reply_text);
+                            self.chat_ui.push(UiChatEntry::assistant(&reply_text));
+                            self.chat_history.push(reply.clone());
+                            let r = self.data.record_chat_message(
+                                &self.current_chat_id,
+                                None,
+                                &reply,
+                                MessageKind::Text,
+                            );
+                            self.report_persistence_result(r);
+                        }
+                    }
+                    sfx::play(SfxEvent::MessageReceived, self.config.sfx_enabled);
+                }
+            }
+            return;
+        }
+
+        self.is_thinking = true;
+        self.mood = AssistantMood::Thinking;
+        self.spawn_ai_turn(ctx.clone(), Some(trimmed));
     }
 
-    fn spawn_ai_turn(&self, ctx: egui::Context) {
+    fn spawn_ai_turn(&self, ctx: egui::Context, latest_user_text: Option<String>) {
         let provider = self.build_provider();
         let history = self.chat_history.clone();
-        let tools = tool_definitions();
+        let tools = match latest_user_text.as_deref() {
+            Some(txt) => select_tools_for_message(txt),
+            None => crate::tools::tool_definitions(),
+        };
         let tx = self.bg_tx.clone();
 
         self.rt.spawn(async move {
@@ -293,7 +399,7 @@ impl RustyDeskApp {
                     mut history_snapshot,
                 } => {
                     if !tool_calls.is_empty() {
-                        history_snapshot.push(ChatMessage {
+                        let assistant_tool_msg = ChatMessage {
                             role: "assistant".to_string(),
                             content: if assistant_text.is_empty() {
                                 None
@@ -303,28 +409,88 @@ impl RustyDeskApp {
                             tool_calls: Some(tool_calls.clone()),
                             tool_call_id: None,
                             raw_gemini_parts,
-                        });
+                        };
+                        let persist_tc = self.data.record_chat_message(
+                            &self.current_chat_id,
+                            None,
+                            &assistant_tool_msg,
+                            MessageKind::ToolCall,
+                        );
+                        self.report_persistence_result(persist_tc);
+                        history_snapshot.push(assistant_tool_msg);
 
                         let mut new_mood = None;
+                        let mut waiting_for_confirmation = false;
                         for tc in &tool_calls {
-                            let (result, m) = execute_tool(
-                                &tc.function.name,
-                                &tc.function.arguments,
+                            let args_val: serde_json::Value =
+                                serde_json::from_str(&tc.function.arguments)
+                                    .unwrap_or(serde_json::Value::Null);
+                            let out = ToolEngine::execute(
+                                ToolRequest {
+                                    tool_name: tc.function.name.clone(),
+                                    args: args_val,
+                                    source: ExecutionSource::Ai,
+                                    conversation_id: Some(self.current_chat_id.clone()),
+                                    tool_call_id: Some(tc.id.clone()),
+                                    approved_confirmation_token: None,
+                                },
                                 &mut self.data,
                                 &mut self.organizer,
                                 &self.config,
                             );
-                            if m.is_some() {
-                                new_mood = m;
+                            if out.mood.is_some() {
+                                new_mood = out.mood;
                             }
-                            history_snapshot.push(ChatMessage::tool_result(&tc.id, result));
+
+                            match out.status {
+                                ToolStatus::NeedsConfirmation(pending) => {
+                                    waiting_for_confirmation = true;
+                                    self.pending_confirmation = Some(pending);
+                                    let tool_msg = ChatMessage::tool_result(&tc.id, out.llm_message);
+                                    let r = self.data.record_chat_message(
+                                        &self.current_chat_id,
+                                        None,
+                                        &tool_msg,
+                                        MessageKind::ToolResult,
+                                    );
+                                    self.report_persistence_result(r);
+                                    history_snapshot.push(tool_msg);
+                                }
+                                ToolStatus::Error => {
+                                    let tool_msg = ChatMessage::tool_result(&tc.id, out.llm_message);
+                                    let r = self.data.record_chat_message(
+                                        &self.current_chat_id,
+                                        None,
+                                        &tool_msg,
+                                        MessageKind::ToolError,
+                                    );
+                                    self.report_persistence_result(r);
+                                    history_snapshot.push(tool_msg);
+                                }
+                                _ => {
+                                    let tool_msg = ChatMessage::tool_result(&tc.id, out.llm_message);
+                                    let r = self.data.record_chat_message(
+                                        &self.current_chat_id,
+                                        None,
+                                        &tool_msg,
+                                        MessageKind::ToolResult,
+                                    );
+                                    self.report_persistence_result(r);
+                                    history_snapshot.push(tool_msg);
+                                }
+                            }
                         }
 
                         if let Some(m) = new_mood {
                             self.mood = m;
                         }
                         self.chat_history = history_snapshot;
-                        self.spawn_ai_turn(ctx.clone());
+                        if waiting_for_confirmation {
+                            self.is_thinking = false;
+                            self.mood = AssistantMood::Idle;
+                        } else {
+                            self.spawn_ai_turn(ctx.clone(), None);
+                        }
                     } else {
                         self.is_thinking = false;
                         if self.mood == AssistantMood::Thinking {
@@ -339,10 +505,16 @@ impl RustyDeskApp {
                         } else {
                             assistant_text
                         };
-                        self.chat_history.push(ChatMessage::assistant_text(&final_text));
+                        let reply_msg = ChatMessage::assistant_text(&final_text);
+                        self.chat_history.push(reply_msg.clone());
                         self.chat_ui.push(UiChatEntry::assistant(&final_text));
-                        self.data
-                            .upsert_chat_session(&self.current_chat_id, &self.chat_ui);
+                        let r = self.data.record_chat_message(
+                            &self.current_chat_id,
+                            None,
+                            &reply_msg,
+                            MessageKind::Text,
+                        );
+                        self.report_persistence_result(r);
                         sfx::play(SfxEvent::MessageReceived, self.config.sfx_enabled);
                         if self.config.tts_enabled {
                             speak_local_async(final_text);
@@ -528,44 +700,116 @@ impl RustyDeskApp {
             )
         };
 
+        let user_msg_obj = ChatMessage::user(&user_msg);
+        let offer_msg_obj = ChatMessage::assistant_text(&assistant_offer);
         self.chat_ui.push(UiChatEntry::user(&user_msg));
-        self.chat_history.push(ChatMessage::user(&user_msg));
+        self.chat_history.push(user_msg_obj.clone());
         self.chat_ui.push(UiChatEntry::assistant(&assistant_offer));
-        self.chat_history
-            .push(ChatMessage::assistant_text(&assistant_offer));
-        self.data
-            .upsert_chat_session(&self.current_chat_id, &self.chat_ui);
+        self.chat_history.push(offer_msg_obj.clone());
+        let r1 = self.data.record_chat_message(
+            &self.current_chat_id,
+            Some(&user_msg),
+            &user_msg_obj,
+            MessageKind::Text,
+        );
+        self.report_persistence_result(r1);
+        let r2 = self.data.record_chat_message(
+            &self.current_chat_id,
+            None,
+            &offer_msg_obj,
+            MessageKind::Text,
+        );
+        self.report_persistence_result(r2);
         sfx::play(SfxEvent::MessageReceived, self.config.sfx_enabled);
     }
 
     fn start_new_chat(&mut self) {
-        self.data
-            .upsert_chat_session(&self.current_chat_id, &self.chat_ui);
         self.current_chat_id = Uuid::new_v4().to_string();
         self.chat_ui = vec![UiChatEntry::assistant(&self.welcome_text)];
         self.chat_history = vec![ChatMessage::system(&self.system_prompt)];
         self.show_chat_history = false;
+        self.pending_confirmation = None;
         self.is_thinking = false;
         self.mood = AssistantMood::Idle;
     }
 
-    fn load_chat_session(&mut self, session: SavedChatSession) {
-        self.data
-            .upsert_chat_session(&self.current_chat_id, &self.chat_ui);
-        self.current_chat_id = session.id;
-        self.chat_ui = session.ui_entries.clone();
-        self.chat_history = vec![ChatMessage::system(&self.system_prompt)];
-        for entry in &session.ui_entries {
-            if entry.is_user {
-                self.chat_history.push(ChatMessage::user(&entry.text));
-            } else {
-                self.chat_history
-                    .push(ChatMessage::assistant_text(&entry.text));
+    fn load_chat_session(&mut self, session: ConversationSummary) {
+        match self
+            .data
+            .load_conversation_history(&session.id, &self.system_prompt, 24)
+        {
+            Ok((ui_entries, tech_history)) => {
+                self.current_chat_id = session.id;
+                self.chat_ui = if ui_entries.is_empty() {
+                    vec![UiChatEntry::assistant(&self.welcome_text)]
+                } else {
+                    ui_entries
+                };
+                self.chat_history = tech_history;
+                self.show_chat_history = false;
+                self.pending_confirmation = None;
+                self.is_thinking = false;
+                self.mood = AssistantMood::Idle;
+            }
+            Err(e) => {
+                self.status_banner = Some(format!("⚠️ Error cargando conversación: {e}"));
             }
         }
-        self.show_chat_history = false;
-        self.is_thinking = false;
-        self.mood = AssistantMood::Idle;
+    }
+
+    fn approve_pending_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_confirmation.take() else {
+            return;
+        };
+        let out = ToolEngine::execute(
+            ToolRequest {
+                tool_name: pending.tool_name,
+                args: pending.args,
+                source: ExecutionSource::Ai,
+                conversation_id: pending.conversation_id,
+                tool_call_id: None, // New execution after explicit confirmation
+                approved_confirmation_token: Some(pending.token),
+            },
+            &mut self.data,
+            &mut self.organizer,
+            &self.config,
+        );
+        if let Some(m) = out.mood {
+            self.mood = m;
+        }
+        let msg_text = if out.status == ToolStatus::Error {
+            format!("⚠️ {}", out.ui_message)
+        } else {
+            out.ui_message
+        };
+        let reply = ChatMessage::assistant_text(&msg_text);
+        self.chat_ui.push(UiChatEntry::assistant(&msg_text));
+        self.chat_history.push(reply.clone());
+        let r = self.data.record_chat_message(
+            &self.current_chat_id,
+            None,
+            &reply,
+            MessageKind::Text,
+        );
+        self.report_persistence_result(r);
+        let _ = ctx;
+    }
+
+    fn cancel_pending_confirmation(&mut self) {
+        let Some(pending) = self.pending_confirmation.take() else {
+            return;
+        };
+        let msg = format!("Operación cancelada por el usuario: {}.", pending.summary);
+        let reply = ChatMessage::assistant_text(&msg);
+        self.chat_ui.push(UiChatEntry::assistant(&msg));
+        self.chat_history.push(reply.clone());
+        let r = self.data.record_chat_message(
+            &self.current_chat_id,
+            None,
+            &reply,
+            MessageKind::Text,
+        );
+        self.report_persistence_result(r);
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -897,7 +1141,8 @@ impl RustyDeskApp {
                 self.start_new_chat();
             }
 
-            let hist_label = format!("Historial ({})", self.data.chat_sessions.len());
+            let total_chats = self.data.count_conversations().unwrap_or(0);
+            let hist_label = format!("Historial ({total_chats})");
             let hist_fill = if self.show_chat_history {
                 accent
             } else {
@@ -921,46 +1166,118 @@ impl RustyDeskApp {
                 self.show_chat_history = !self.show_chat_history;
             }
 
-            for (label, prompt) in [
-                ("+1 Agua", "Tomé un vaso de agua"),
-                ("Pomodoro", "Inicia un pomodoro"),
-                ("Ordenar", "Ordena mi escritorio"),
+            for (label, cmd) in [
+                ("+1 Agua", "/agua"),
+                ("Pomodoro", "/pomodoro 25"),
+                ("Ordenar", "/ordenar preview"),
             ] {
                 let btn = egui::Button::new(RichText::new(label).size(11.5))
                     .fill(Color32::from_rgb(30, 41, 59))
                     .rounding(4.0);
                 if ui.add(btn).clicked() {
-                    self.send_user_message(prompt.to_string(), ctx);
+                    self.send_user_message(cmd.to_string(), ctx);
                 }
             }
         });
         ui.add_space(6.0);
 
+        if let Some(pending) = self.pending_confirmation.clone() {
+            egui::Frame::none()
+                .fill(Color32::from_rgba_unmultiplied(250, 204, 21, 22))
+                .stroke(Stroke::new(1.5_f32, Color32::from_rgb(250, 204, 21)))
+                .rounding(8.0)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!("Confirmación requerida: {}", pending.summary))
+                            .strong()
+                            .size(12.0)
+                            .color(Color32::from_rgb(250, 204, 21)),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if pixel_button(
+                            ui,
+                            PixelIcon::Check,
+                            "Confirmar",
+                            accent,
+                            Color32::from_rgb(15, 20, 32),
+                            "Autorizar esta operación",
+                        )
+                        .clicked()
+                        {
+                            self.approve_pending_confirmation(ctx);
+                        }
+                        if pixel_button(
+                            ui,
+                            PixelIcon::Close,
+                            "Cancelar",
+                            Color32::from_rgb(153, 27, 27),
+                            Color32::WHITE,
+                            "Rechazar esta operación",
+                        )
+                        .clicked()
+                        {
+                            self.cancel_pending_confirmation();
+                        }
+                    });
+                });
+            ui.add_space(6.0);
+        }
+
         if self.show_chat_history {
+            const PAGE_SIZE: usize = 15;
+            let total = self.data.count_conversations().unwrap_or(0);
+            let max_page = total.saturating_sub(1) / PAGE_SIZE;
+            if self.history_page > max_page {
+                self.history_page = max_page;
+            }
+            let sessions = self
+                .data
+                .list_conversations_page(PAGE_SIZE, self.history_page * PAGE_SIZE)
+                .unwrap_or_default();
+
             egui::Frame::none()
                 .fill(Color32::from_rgb(18, 25, 40))
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(51, 65, 85)))
                 .rounding(6.0)
                 .inner_margin(8.0)
                 .show(ui, |ui| {
-                    ui.label(RichText::new("Chats guardados").strong().size(12.0));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Chats guardados").strong().size(12.0));
+                        if total > PAGE_SIZE {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if self.history_page < max_page && ui.small_button(">").clicked() {
+                                    self.history_page += 1;
+                                }
+                                ui.label(
+                                    RichText::new(format!("Pág {}/{}", self.history_page + 1, max_page + 1))
+                                        .size(11.0)
+                                        .color(Color32::GRAY),
+                                );
+                                if self.history_page > 0 && ui.small_button("<").clicked() {
+                                    self.history_page -= 1;
+                                }
+                            });
+                        }
+                    });
                     ui.add_space(4.0);
-                    if self.data.chat_sessions.is_empty() {
+                    if sessions.is_empty() {
                         ui.label(
                             RichText::new("Todavía no hay chats guardados.")
                                 .size(11.5)
                                 .color(Color32::GRAY),
                         );
                     } else {
-                        let sessions = self.data.chat_sessions.clone();
                         egui::ScrollArea::vertical()
                             .id_salt("chat_history_scroll")
                             .max_height(150.0)
                             .show(ui, |ui| {
                                 for s in sessions {
                                     let is_current = s.id == self.current_chat_id;
+                                    let local_dt = format_local_datetime_from_utc(&s.updated_at);
                                     ui.horizontal(|ui| {
-                                        let label = format!("{}  ({})", s.title, s.updated_at);
+                                        let label = format!("{}  ({})", s.title, local_dt);
                                         let btn = egui::Button::new(
                                             RichText::new(label).size(11.5).color(if is_current {
                                                 accent
@@ -983,7 +1300,8 @@ impl RustyDeskApp {
                                         )
                                         .clicked()
                                         {
-                                            self.data.delete_chat_session(&s.id);
+                                            let r = self.data.delete_conversation(&s.id);
+                                            self.report_persistence_result(r);
                                         }
                                     });
                                     ui.add_space(3.0);
@@ -1124,18 +1442,31 @@ impl RustyDeskApp {
             .clicked()
                 || enter)
                 && !self.new_task_input.trim().is_empty() {
-                self.data
-                    .tasks
-                    .push(TaskItem::new(self.new_task_input.trim()));
-                self.new_task_input.clear();
-                sfx::play(SfxEvent::TaskAdded, self.config.sfx_enabled);
-                let _ = self.data.save();
+                let title = std::mem::take(&mut self.new_task_input);
+                let out = ToolEngine::execute(
+                    ToolRequest {
+                        tool_name: "add_task".to_string(),
+                        args: serde_json::json!({ "title": title.trim() }),
+                        source: ExecutionSource::Ui,
+                        conversation_id: None,
+                        tool_call_id: None,
+                        approved_confirmation_token: None,
+                    },
+                    &mut self.data,
+                    &mut self.organizer,
+                    &self.config,
+                );
+                if out.status == ToolStatus::Error {
+                    self.status_banner = Some(format!("⚠️ {}", out.ui_message));
+                } else {
+                    sfx::play(SfxEvent::TaskAdded, self.config.sfx_enabled);
+                }
             }
         });
         ui.add_space(6.0);
 
         let mut remove_idx = None;
-        let mut changed = false;
+        let mut toggled_task: Option<TaskItem> = None;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             if self.data.tasks.is_empty() {
@@ -1154,7 +1485,7 @@ impl RustyDeskApp {
                                 } else {
                                     sfx::play(SfxEvent::Click, self.config.sfx_enabled);
                                 }
-                                changed = true;
+                                toggled_task = Some(task.clone());
                             }
                             let mut text = RichText::new(&task.title);
                             if task.done {
@@ -1181,18 +1512,19 @@ impl RustyDeskApp {
             }
         });
 
-        if let Some(i) = remove_idx {
-            self.data.tasks.remove(i);
-            changed = true;
+        if let Some(t) = toggled_task {
+            let r = self.data.upsert_task(&t);
+            self.report_persistence_result(r);
         }
-        if changed {
-            let _ = self.data.save();
+        if let Some(i) = remove_idx {
+            let r = self.data.delete_task_at(i);
+            self.report_persistence_result(r);
         }
     }
 
     fn render_habits_tab(&mut self, ui: &mut egui::Ui, accent: Color32) {
-        let mut changed = false;
-        for h in &mut self.data.habits {
+        let mut delta_action: Option<(usize, i32)> = None;
+        for (idx, h) in self.data.habits.iter_mut().enumerate() {
             h.ensure_today();
             egui::Frame::none()
                 .fill(Color32::from_rgb(24, 31, 48))
@@ -1203,13 +1535,10 @@ impl RustyDeskApp {
                         ui.label(RichText::new(format!("{} {}", h.icon, h.name)).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("+1").clicked() {
-                                h.current_count = h.current_count.saturating_add(1);
-                                sfx::play(SfxEvent::HabitLogged, self.config.sfx_enabled);
-                                changed = true;
+                                delta_action = Some((idx, 1));
                             }
                             if ui.small_button("-1").clicked() && h.current_count > 0 {
-                                h.current_count -= 1;
-                                changed = true;
+                                delta_action = Some((idx, -1));
                             }
                             ui.label(RichText::new(format!("{}/{}", h.current_count, h.daily_goal)).color(accent));
                         });
@@ -1219,6 +1548,33 @@ impl RustyDeskApp {
                     ui.add(egui::ProgressBar::new(progress).fill(accent).show_percentage());
                 });
             ui.add_space(6.0);
+        }
+
+        if let Some((idx, delta)) = delta_action {
+            if delta > 0 {
+                let name = self.data.habits[idx].name.clone();
+                let out = ToolEngine::execute(
+                    ToolRequest {
+                        tool_name: "log_habit".to_string(),
+                        args: serde_json::json!({ "name": name, "delta": delta }),
+                        source: ExecutionSource::Ui,
+                        conversation_id: None,
+                        tool_call_id: None,
+                        approved_confirmation_token: None,
+                    },
+                    &mut self.data,
+                    &mut self.organizer,
+                    &self.config,
+                );
+                if out.status == ToolStatus::Error {
+                    self.status_banner = Some(format!("⚠️ {}", out.ui_message));
+                } else {
+                    sfx::play(SfxEvent::HabitLogged, self.config.sfx_enabled);
+                }
+            } else {
+                let r = self.data.log_habit_delta(idx, delta);
+                self.report_persistence_result(r);
+            }
         }
 
         ui.separator();
@@ -1240,19 +1596,19 @@ impl RustyDeskApp {
             )
             .clicked()
                 && !self.new_habit_name.trim().is_empty() {
-                self.data.habits.push(HabitItem::new(
+                let item = HabitItem::new(
                     self.new_habit_name.trim(),
                     self.new_habit_icon.trim(),
                     self.new_habit_goal,
-                ));
-                self.new_habit_name.clear();
-                changed = true;
+                );
+                let r = self.data.upsert_habit(&item);
+                if r.is_ok() {
+                    self.data.habits.push(item);
+                    self.new_habit_name.clear();
+                }
+                self.report_persistence_result(r);
             }
         });
-
-        if changed {
-            let _ = self.data.save();
-        }
     }
 
     fn render_focus_tab(&mut self, ui: &mut egui::Ui, accent: Color32) {
@@ -1297,15 +1653,28 @@ impl RustyDeskApp {
                 )
                 .clicked()
                 {
-                    self.data.pomodoro.toggle_pause();
-                    if self.data.pomodoro.running {
+                    let out = ToolEngine::execute(
+                        ToolRequest {
+                            tool_name: "pause_pomodoro".to_string(),
+                            args: serde_json::json!({}),
+                            source: ExecutionSource::Ui,
+                            conversation_id: None,
+                            tool_call_id: None,
+                            approved_confirmation_token: None,
+                        },
+                        &mut self.data,
+                        &mut self.organizer,
+                        &self.config,
+                    );
+                    if out.status == ToolStatus::Error {
+                        self.status_banner = Some(format!("⚠️ {}", out.ui_message));
+                    } else if self.data.pomodoro.running {
                         self.mood = AssistantMood::Focused;
                         sfx::play(SfxEvent::PomodoroStart, self.config.sfx_enabled);
                     } else {
                         self.mood = AssistantMood::Idle;
                         sfx::play(SfxEvent::Click, self.config.sfx_enabled);
                     }
-                    let _ = self.data.save();
                 }
                 if pixel_button(
                     ui,
@@ -1366,16 +1735,24 @@ impl RustyDeskApp {
             )
             .clicked()
             {
-                let dir = PathBuf::from(&self.config.organize_target_dir);
-                match self.organizer.preview(&dir) {
-                    Ok(plans) => {
-                        self.status_banner = Some(format!(
-                            "Vista previa: {} archivo(s) para organizar.",
-                            plans.len()
-                        ));
-                    }
-                    Err(e) => self.status_banner = Some(format!("⚠️ {e}")),
-                }
+                let out = ToolEngine::execute(
+                    ToolRequest {
+                        tool_name: "preview_organize_desktop".to_string(),
+                        args: serde_json::json!({}),
+                        source: ExecutionSource::Ui,
+                        conversation_id: None,
+                        tool_call_id: None,
+                        approved_confirmation_token: None,
+                    },
+                    &mut self.data,
+                    &mut self.organizer,
+                    &self.config,
+                );
+                self.status_banner = Some(if out.status == ToolStatus::Error {
+                    format!("⚠️ {}", out.ui_message)
+                } else {
+                    format!("Vista previa: {} archivo(s) para organizar.", self.organizer.last_preview.len())
+                });
             }
 
             if pixel_button(
@@ -1388,17 +1765,26 @@ impl RustyDeskApp {
             )
             .clicked()
             {
-                let dir = PathBuf::from(&self.config.organize_target_dir);
-                match self.organizer.apply(&dir) {
-                    Ok(n) => {
-                        self.mood = AssistantMood::Happy;
-                        sfx::play(SfxEvent::OrganizeDone, self.config.sfx_enabled);
-                        self.status_banner = Some(format!("Se organizaron {n} archivo(s)."));
-                    }
-                    Err(e) => {
-                        sfx::play(SfxEvent::Error, self.config.sfx_enabled);
-                        self.status_banner = Some(format!("⚠️ {e}"));
-                    }
+                let out = ToolEngine::execute(
+                    ToolRequest {
+                        tool_name: "apply_organize_desktop".to_string(),
+                        args: serde_json::json!({}),
+                        source: ExecutionSource::Ui,
+                        conversation_id: None,
+                        tool_call_id: None,
+                        approved_confirmation_token: None,
+                    },
+                    &mut self.data,
+                    &mut self.organizer,
+                    &self.config,
+                );
+                if out.status == ToolStatus::Error {
+                    sfx::play(SfxEvent::Error, self.config.sfx_enabled);
+                    self.status_banner = Some(format!("⚠️ {}", out.ui_message));
+                } else {
+                    self.mood = AssistantMood::Happy;
+                    sfx::play(SfxEvent::OrganizeDone, self.config.sfx_enabled);
+                    self.status_banner = Some(out.ui_message);
                 }
             }
 
@@ -1413,10 +1799,24 @@ impl RustyDeskApp {
                 )
                 .clicked()
             {
-                match self.organizer.undo_last() {
-                    Ok(n) => self.status_banner = Some(format!("Se restauraron {n} archivo(s).")),
-                    Err(e) => self.status_banner = Some(format!("⚠️ {e}")),
-                }
+                let out = ToolEngine::execute(
+                    ToolRequest {
+                        tool_name: "undo_organize_desktop".to_string(),
+                        args: serde_json::json!({}),
+                        source: ExecutionSource::Ui,
+                        conversation_id: None,
+                        tool_call_id: None,
+                        approved_confirmation_token: None,
+                    },
+                    &mut self.data,
+                    &mut self.organizer,
+                    &self.config,
+                );
+                self.status_banner = Some(if out.status == ToolStatus::Error {
+                    format!("⚠️ {}", out.ui_message)
+                } else {
+                    out.ui_message
+                });
             }
         });
 

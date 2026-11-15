@@ -169,6 +169,44 @@ impl AiProvider for OpenAiCompatibleProvider {
         let resp = req.send().await?;
         let status = resp.status();
         let text = resp.text().await?;
+
+        // Fallback if the configured model/endpoint does not support Tool Calling.
+        if !status.is_success()
+            && !tools.is_empty()
+            && (status.as_u16() == 400 || status.as_u16() == 404 || status.as_u16() == 422)
+        {
+            let lower = text.to_lowercase();
+            if lower.contains("tool") || lower.contains("function") {
+                let fallback_body = json!({
+                    "model": self.model,
+                    "messages": messages,
+                });
+                let mut retry_req = self.client.post(&url).json(&fallback_body);
+                if !self.api_key.trim().is_empty() {
+                    retry_req = retry_req.bearer_auth(self.api_key.trim());
+                }
+                let retry_resp = retry_req.send().await?;
+                let retry_status = retry_resp.status();
+                let retry_text = retry_resp.text().await?;
+                if !retry_status.is_success() {
+                    anyhow::bail!("Error de API ({retry_status}): {retry_text}");
+                }
+                let parsed: ApiChatResponse = serde_json::from_str(&retry_text).map_err(|e| {
+                    anyhow::anyhow!("Respuesta JSON inválida: {e} — {retry_text}")
+                })?;
+                let first = parsed
+                    .choices
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("La API no devolvió choices"))?;
+                return Ok(AiResponse {
+                    content: first.message.content,
+                    tool_calls: first.message.tool_calls.unwrap_or_default(),
+                    raw_gemini_parts: None,
+                });
+            }
+        }
+
         if !status.is_success() {
             anyhow::bail!("Error de API ({status}): {text}");
         }
@@ -222,12 +260,22 @@ pub struct MockProvider;
 #[async_trait]
 impl AiProvider for MockProvider {
     async fn chat(&self, messages: &[ChatMessage], _tools: &[ToolDef]) -> anyhow::Result<AiResponse> {
-        // If the last message is a tool result, summarize it nicely.
+        // If the last message is a tool result, summarize all tool results from the latest turn.
         if let Some(last) = messages.last() {
             if last.role == "tool" {
-                let result_text = last.content.as_deref().unwrap_or("Hecho.");
+                let results: Vec<&str> = messages
+                    .iter()
+                    .rev()
+                    .take_while(|m| m.role == "tool")
+                    .filter_map(|m| m.content.as_deref())
+                    .collect();
+                let summary = results
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join(" | ");
                 return Ok(AiResponse {
-                    content: Some(format!("Listo (Modo Local): {result_text}")),
+                    content: Some(format!("Listo (Modo Local): {summary}")),
                     tool_calls: vec![],
                     raw_gemini_parts: None,
                 });
@@ -243,7 +291,11 @@ impl AiProvider for MockProvider {
             .trim();
         let lower = user_text.to_lowercase();
 
-        // Simple Spanish/English intent matching -> emits real tool calls
+        if lower.contains("simular error") {
+            anyhow::bail!("Error simulado por MockProvider");
+        }
+
+        let mut calls = Vec::new();
         if lower.contains("tarea") || lower.contains("anota") || lower.contains("pendiente") {
             let title = user_text
                 .split(':')
@@ -251,32 +303,38 @@ impl AiProvider for MockProvider {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(user_text);
-            return Ok(mock_tool("add_task", json!({ "title": title })));
+            calls.push(make_mock_call("add_task", json!({ "title": title }), calls.len()));
         }
-
         if lower.contains("agua") || lower.contains("vaso") || lower.contains("hábito") || lower.contains("habito") {
-            return Ok(mock_tool(
+            calls.push(make_mock_call(
                 "log_habit",
                 json!({ "name": "Vasos de agua", "delta": 1 }),
+                calls.len(),
             ));
         }
-
         if lower.contains("pomodoro") || lower.contains("enfoque") || lower.contains("concentr") {
             if lower.contains("pausa") || lower.contains("deten") || lower.contains("para") {
-                return Ok(mock_tool("pause_pomodoro", json!({})));
+                calls.push(make_mock_call("pause_pomodoro", json!({}), calls.len()));
+            } else {
+                calls.push(make_mock_call("start_pomodoro", json!({ "minutes": 25 }), calls.len()));
             }
-            return Ok(mock_tool("start_pomodoro", json!({ "minutes": 25 })));
         }
-
         if lower.contains("deshacer") || lower.contains("undo") {
-            return Ok(mock_tool("undo_organize_desktop", json!({})));
+            calls.push(make_mock_call("undo_organize_desktop", json!({}), calls.len()));
+        } else if lower.contains("ordena") || lower.contains("organiza") || lower.contains("escritorio") {
+            if lower.contains("aplica") || lower.contains("confirma") || lower.contains("ejecuta") {
+                calls.push(make_mock_call("apply_organize_desktop", json!({}), calls.len()));
+            } else {
+                calls.push(make_mock_call("preview_organize_desktop", json!({}), calls.len()));
+            }
         }
 
-        if lower.contains("ordena") || lower.contains("organiza") || lower.contains("escritorio") {
-            if lower.contains("aplica") || lower.contains("confirma") || lower.contains("ejecuta") {
-                return Ok(mock_tool("apply_organize_desktop", json!({})));
-            }
-            return Ok(mock_tool("preview_organize_desktop", json!({})));
+        if !calls.is_empty() {
+            return Ok(AiResponse {
+                content: None,
+                tool_calls: calls,
+                raw_gemini_parts: None,
+            });
         }
 
         Ok(AiResponse {
@@ -537,18 +595,146 @@ impl AiProvider for GoogleGeminiProvider {
     }
 }
 
-fn mock_tool(name: &str, args: Value) -> AiResponse {
-    AiResponse {
-        content: None,
-        tool_calls: vec![ToolCall {
-            id: format!("mock_{name}"),
-            kind: "function".to_string(),
-            function: ToolFunctionCall {
-                name: name.to_string(),
-                arguments: args.to_string(),
+fn make_mock_call(name: &str, args: Value, idx: usize) -> ToolCall {
+    ToolCall {
+        id: format!("mock_{name}_{idx}"),
+        kind: "function".to_string(),
+        function: ToolFunctionCall {
+            name: name.to_string(),
+            arguments: args.to_string(),
+        },
+        thought_signature: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn spawn_mock_http_server(responses: Vec<(u16, String)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    let status_text = if status == 200 { "OK" } else { "Bad Request" };
+                    let resp = format!(
+                        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn mock_provider_supports_multi_tool_errors_and_resumed_history() {
+        let mock = MockProvider;
+        let resp = mock
+            .chat(
+                &[ChatMessage::user("Anota una tarea: pan y tomé un vaso de agua")],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.tool_calls.len(), 2);
+        assert_eq!(resp.tool_calls[0].function.name, "add_task");
+        assert_eq!(resp.tool_calls[1].function.name, "log_habit");
+
+        let resumed = mock
+            .chat(
+                &[
+                    ChatMessage::user("Anota una tarea: pan y tomé un vaso de agua"),
+                    ChatMessage {
+                        role: "assistant".to_string(),
+                        content: None,
+                        tool_calls: Some(resp.tool_calls.clone()),
+                        tool_call_id: None,
+                        raw_gemini_parts: None,
+                    },
+                    ChatMessage::tool_result(&resp.tool_calls[0].id, "Tarea agregada"),
+                    ChatMessage::tool_result(&resp.tool_calls[1].id, "Agua 1/8"),
+                ],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(resumed.tool_calls.is_empty());
+        assert!(resumed.content.unwrap().contains("Tarea agregada | Agua 1/8"));
+
+        assert!(mock
+            .chat(&[ChatMessage::user("por favor simular error")], &[])
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn openai_provider_tool_calls_and_unsupported_tools_fallback() {
+        let base_url = spawn_mock_http_server(vec![
+            (
+                400,
+                r#"{"error":{"message":"This model does not support tools"}}"#.to_string(),
+            ),
+            (
+                200,
+                r#"{"choices":[{"message":{"content":"Respuesta sin tools"}}]}"#.to_string(),
+            ),
+        ]);
+        let provider = OpenAiCompatibleProvider::new(
+            base_url,
+            "test-key".to_string(),
+            "test-model".to_string(),
+            "whisper-1".to_string(),
+        );
+        let tools = vec![ToolDef {
+            kind: "function",
+            function: ToolFunctionDef {
+                name: "list_tasks",
+                description: "Lista tareas",
+                parameters: json!({"type":"object","properties":{}}),
             },
-            thought_signature: None,
-        }],
-        raw_gemini_parts: None,
+        }];
+        let resp = provider
+            .chat(&[ChatMessage::user("hola")], &tools)
+            .await
+            .unwrap();
+        assert_eq!(resp.content.as_deref(), Some("Respuesta sin tools"));
+    }
+
+    #[tokio::test]
+    async fn gemini_provider_parses_function_call_and_preserves_parts() {
+        let base_url = spawn_mock_http_server(vec![(
+            200,
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_tasks","args":{}},"thoughtSignature":"sig-123"}]}}]}"#
+                .to_string(),
+        )]);
+        let provider = GoogleGeminiProvider::new(
+            base_url,
+            "test-key".to_string(),
+            "gemini-flash-latest".to_string(),
+        );
+        let tools = vec![ToolDef {
+            kind: "function",
+            function: ToolFunctionDef {
+                name: "list_tasks",
+                description: "Lista tareas",
+                parameters: json!({"type":"object","properties":{}}),
+            },
+        }];
+        let resp = provider
+            .chat(&[ChatMessage::user("listame las tareas")], &tools)
+            .await
+            .unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].function.name, "list_tasks");
+        assert_eq!(resp.tool_calls[0].thought_signature.as_deref(), Some("sig-123"));
+        assert!(resp.raw_gemini_parts.is_some());
     }
 }
