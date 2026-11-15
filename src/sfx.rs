@@ -69,7 +69,10 @@ pub fn play(event: SfxEvent, enabled: bool) {
         let cache_dir = cache_sounds_dir();
         let _ = fs::create_dir_all(&cache_dir);
         let cached_path = cache_dir.join(event.file_name());
-        if !cached_path.exists() {
+        let needs_regen = fs::metadata(&cached_path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true);
+        if needs_regen {
             if let Err(e) = write_synth_wav(&cached_path, event) {
                 eprintln!("Error generando SFX {:?}: {e}", event);
                 return;
@@ -80,10 +83,20 @@ pub fn play(event: SfxEvent, enabled: bool) {
 }
 
 fn play_wav_file(path: &Path) {
-    for player in ["pw-play", "paplay", "aplay"] {
-        if let Ok(mut child) = Command::new(player).arg(path).spawn() {
-            let _ = child.wait();
-            return;
+    let players: &[(&str, &[&str])] = &[
+        ("pw-play", &[]),
+        ("paplay", &[]),
+        ("aplay", &["-q"]),
+        ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet"]),
+    ];
+
+    for (bin, extra_args) in players {
+        if let Ok(mut child) = Command::new(bin).args(*extra_args).arg(path).spawn() {
+            if let Ok(status) = child.wait() {
+                if status.success() {
+                    return;
+                }
+            }
         }
     }
 }

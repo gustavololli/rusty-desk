@@ -1015,6 +1015,7 @@ impl RustyDeskApp {
             }
         }
 
+        sfx::play(SfxEvent::Click, self.config.sfx_enabled);
         self.emit_pet_event(PetEvent::ModeChanged(target));
     }
 
