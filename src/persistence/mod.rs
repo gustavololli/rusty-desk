@@ -38,6 +38,32 @@ pub struct PersistedPomodoro {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedPlaylist {
+    pub id: String,
+    pub name: String,
+    pub source_path: Option<String>,
+    pub track_count: usize,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedTrack {
+    pub id: String,
+    pub playlist_id: String,
+    pub position: usize,
+    pub title: String,
+    pub uri: String,
+    pub duration_secs: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewMusicTrack {
+    pub title: String,
+    pub uri: String,
+    pub duration_secs: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationSummary {
     pub id: String,
     pub title: String,
@@ -555,6 +581,97 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    pub fn save_playlist_with_tracks(
+        &mut self,
+        name: &str,
+        source_path: Option<&str>,
+        tracks: &[NewMusicTrack],
+    ) -> anyhow::Result<PersistedPlaylist> {
+        let now = Utc::now().to_rfc3339();
+        let playlist_id = Uuid::new_v4().to_string();
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO music_playlists (id, name, source_path, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![playlist_id, name, source_path, now],
+        )?;
+
+        for (pos, track) in tracks.iter().enumerate() {
+            let track_id = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO music_tracks (id, playlist_id, position, title, uri, duration_secs, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    track_id,
+                    playlist_id,
+                    pos as i64,
+                    track.title,
+                    track.uri,
+                    track.duration_secs,
+                    now
+                ],
+            )?;
+        }
+        tx.commit()?;
+
+        Ok(PersistedPlaylist {
+            id: playlist_id,
+            name: name.to_string(),
+            source_path: source_path.map(str::to_string),
+            track_count: tracks.len(),
+            created_at: now,
+        })
+    }
+
+    pub fn list_playlists(&self) -> anyhow::Result<Vec<PersistedPlaylist>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.name, p.source_path, p.created_at, COUNT(t.id)
+             FROM music_playlists p
+             LEFT JOIN music_tracks t ON t.playlist_id = p.id
+             GROUP BY p.id
+             ORDER BY p.created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let count: i64 = row.get(4)?;
+            Ok(PersistedPlaylist {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                source_path: row.get(2)?,
+                created_at: row.get(3)?,
+                track_count: count.max(0) as usize,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_tracks(&self, playlist_id: &str) -> anyhow::Result<Vec<PersistedTrack>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, playlist_id, position, title, uri, duration_secs
+             FROM music_tracks
+             WHERE playlist_id = ?1
+             ORDER BY position ASC",
+        )?;
+        let rows = stmt.query_map([playlist_id], |row| {
+            let pos: i64 = row.get(2)?;
+            Ok(PersistedTrack {
+                id: row.get(0)?,
+                playlist_id: row.get(1)?,
+                position: pos.max(0) as usize,
+                title: row.get(3)?,
+                uri: row.get(4)?,
+                duration_secs: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn delete_playlist(&self, playlist_id: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM music_playlists WHERE id = ?1", [playlist_id])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -716,6 +833,48 @@ mod tests {
             MigrationOutcome::Migrated { tasks: 1, .. }
         ));
         assert_eq!(db_partial.list_tasks().unwrap()[0].title, "Solo título");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sqlite_music_playlists_crud_and_cascade_delete() {
+        let dir = temp_dir("music_db");
+        let db_path = dir.join("rusty.db");
+        let mut db = Database::open(&db_path).unwrap();
+
+        let pl = db
+            .save_playlist_with_tracks(
+                "LoFi Study",
+                Some("/tmp/lofi.m3u"),
+                &[
+                    NewMusicTrack {
+                        title: "Track A".to_string(),
+                        uri: "/tmp/a.mp3".to_string(),
+                        duration_secs: Some(180),
+                    },
+                    NewMusicTrack {
+                        title: "Track B".to_string(),
+                        uri: "https://example.com/stream.mp3".to_string(),
+                        duration_secs: None,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let playlists = db.list_playlists().unwrap();
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].name, "LoFi Study");
+        assert_eq!(playlists[0].track_count, 2);
+
+        let tracks = db.list_tracks(&pl.id).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].title, "Track A");
+        assert_eq!(tracks[1].title, "Track B");
+
+        db.delete_playlist(&pl.id).unwrap();
+        assert!(db.list_playlists().unwrap().is_empty());
+        assert!(db.list_tracks(&pl.id).unwrap().is_empty());
 
         let _ = fs::remove_dir_all(&dir);
     }

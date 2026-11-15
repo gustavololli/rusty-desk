@@ -1,7 +1,7 @@
 use crate::ai::{ChatMessage, ToolCall};
 use crate::persistence::{
-    ConversationSummary, Database, MessageKind, MigrationOutcome, NewPersistedMessage,
-    NewToolExecution, PersistedMessage,
+    ConversationSummary, Database, MessageKind, MigrationOutcome, NewMusicTrack,
+    NewPersistedMessage, NewToolExecution, PersistedMessage, PersistedPlaylist, PersistedTrack,
 };
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use directories::ProjectDirs;
@@ -186,6 +186,7 @@ pub struct AppData {
     pub tasks: Vec<TaskItem>,
     pub habits: Vec<HabitItem>,
     pub pomodoro: PomodoroState,
+    pub playlists: Vec<PersistedPlaylist>,
     pub db: Option<Database>,
     pub startup_error: Option<String>,
     pub migration_notice: Option<String>,
@@ -200,6 +201,7 @@ impl Default for AppData {
                 HabitItem::new("Pausas activas", "🧘", 4),
             ],
             pomodoro: PomodoroState::default(),
+            playlists: vec![],
             db: None,
             startup_error: None,
             migration_notice: None,
@@ -348,10 +350,13 @@ impl AppData {
             }
         };
 
+        let playlists = db.list_playlists()?;
+
         Ok(Self {
             tasks,
             habits,
             pomodoro,
+            playlists,
             db: Some(db),
             startup_error: None,
             migration_notice: None,
@@ -401,6 +406,35 @@ impl AppData {
             db.soft_delete_task(&id)?;
         }
         self.tasks.remove(idx);
+        Ok(())
+    }
+
+    pub fn import_m3u_playlist(
+        &mut self,
+        name: &str,
+        source_path: Option<&str>,
+        tracks: &[NewMusicTrack],
+    ) -> anyhow::Result<PersistedPlaylist> {
+        let Some(db) = self.db.as_mut() else {
+            anyhow::bail!("Base de datos SQLite no disponible.");
+        };
+        let playlist = db.save_playlist_with_tracks(name, source_path, tracks)?;
+        self.playlists.insert(0, playlist.clone());
+        Ok(playlist)
+    }
+
+    pub fn load_playlist_tracks(&self, playlist_id: &str) -> anyhow::Result<Vec<PersistedTrack>> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(vec![]);
+        };
+        db.list_tracks(playlist_id)
+    }
+
+    pub fn delete_playlist(&mut self, playlist_id: &str) -> anyhow::Result<()> {
+        if let Some(db) = self.db.as_ref() {
+            db.delete_playlist(playlist_id)?;
+        }
+        self.playlists.retain(|p| p.id != playlist_id);
         Ok(())
     }
 

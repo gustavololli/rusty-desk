@@ -7,8 +7,9 @@ use crate::ai::{
 };
 use crate::config::{clamp_pet_position, AppConfig, PetIntensity, PetSize};
 use crate::converter::{self, CompactionMode};
+use crate::music::{self, MusicPlayer};
 use crate::organizer::FileOrganizer;
-use crate::persistence::{ConversationSummary, MessageKind};
+use crate::persistence::{ConversationSummary, MessageKind, NewMusicTrack, PersistedTrack};
 use crate::sfx::{self, SfxEvent};
 use crate::state::{
     format_local_datetime_from_utc, AppData, AssistantMood, HabitItem, PomodoroPhase, TaskItem,
@@ -37,6 +38,7 @@ enum ActiveTab {
     Tasks,
     Habits,
     Focus,
+    Music,
     Organizer,
     Markdown,
     Compact,
@@ -64,6 +66,8 @@ enum BgEvent {
         paths: Vec<PathBuf>,
     },
     FilePickError(String),
+    M3uPicked(Option<PathBuf>),
+    M3uPickError(String),
 }
 
 pub struct RustyDeskApp {
@@ -114,6 +118,14 @@ pub struct RustyDeskApp {
     compact_input: String,
     compact_mode_tab: CompactionMode,
 
+    music_player: MusicPlayer,
+    music_m3u_path_input: String,
+    music_selected_playlist_id: Option<String>,
+    music_tracks: Vec<PersistedTrack>,
+    music_current_track_idx: Option<usize>,
+    music_volume: u8,
+    music_status: Option<String>,
+
     bg_tx: Sender<BgEvent>,
     bg_rx: Receiver<BgEvent>,
     global_cursor: Arc<Mutex<Option<(i16, i16)>>>,
@@ -148,6 +160,12 @@ impl RustyDeskApp {
 
         sfx::play(SfxEvent::Startup, config.sfx_enabled);
         apply_platform_always_on_top(true);
+
+        let initial_playlist_id = data.playlists.first().map(|p| p.id.clone());
+        let initial_tracks = initial_playlist_id
+            .as_deref()
+            .and_then(|id| data.load_playlist_tracks(id).ok())
+            .unwrap_or_default();
 
         Self {
             rt: tokio::runtime::Runtime::new().expect("No se pudo iniciar Tokio"),
@@ -190,6 +208,13 @@ impl RustyDeskApp {
             md_error: None,
             compact_input: String::new(),
             compact_mode_tab: CompactionMode::Moderate,
+            music_player: MusicPlayer::default(),
+            music_m3u_path_input: String::new(),
+            music_selected_playlist_id: initial_playlist_id,
+            music_tracks: initial_tracks,
+            music_current_track_idx: None,
+            music_volume: 80,
+            music_status: None,
             bg_tx,
             bg_rx,
             global_cursor,
@@ -621,6 +646,14 @@ impl RustyDeskApp {
                 BgEvent::FilePickError(err) => {
                     self.status_banner = Some(format!("⚠️ {err}"));
                 }
+                BgEvent::M3uPicked(maybe_path) => {
+                    if let Some(path) = maybe_path {
+                        self.import_m3u_from_path(&path);
+                    }
+                }
+                BgEvent::M3uPickError(err) => {
+                    self.music_status = Some(format!("⚠️ {err}"));
+                }
             }
         }
     }
@@ -858,6 +891,18 @@ impl RustyDeskApp {
             return;
         }
 
+        if let Some(first_m3u) = paths.iter().find(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("m3u") || e.eq_ignore_ascii_case("m3u8"))
+        }) {
+            self.import_m3u_from_path(first_m3u);
+            if self.window_mode == WindowMode::Expanded {
+                self.active_tab = ActiveTab::Music;
+            }
+            return;
+        }
+
         if self.window_mode == WindowMode::Expanded && self.active_tab == ActiveTab::Chat {
             self.notify_chat_files(&paths, ctx);
         } else {
@@ -990,6 +1035,9 @@ impl eframe::App for RustyDeskApp {
         self.process_bg_events(ctx);
         self.handle_dropped_files(ctx);
         self.tick_pomodoro(ctx);
+        if self.music_player.poll_finished() {
+            self.play_next_music_track();
+        }
 
         let time = ctx.input(|i| i.time);
         let dt = if self.last_frame_time > 0.0 {
@@ -1206,6 +1254,14 @@ impl eframe::App for RustyDeskApp {
                                 nav_pill(
                                     ui,
                                     &mut self.active_tab,
+                                    ActiveTab::Music,
+                                    PixelIcon::Play,
+                                    "Música",
+                                    accent,
+                                );
+                                nav_pill(
+                                    ui,
+                                    &mut self.active_tab,
                                     ActiveTab::Organizer,
                                     PixelIcon::Organizer,
                                     "Ordenar",
@@ -1256,6 +1312,7 @@ impl eframe::App for RustyDeskApp {
                         ActiveTab::Tasks => self.render_tasks_tab(ui),
                         ActiveTab::Habits => self.render_habits_tab(ui, accent),
                         ActiveTab::Focus => self.render_focus_tab(ui, accent),
+                        ActiveTab::Music => self.render_music_tab(ui, ctx, accent),
                         ActiveTab::Organizer => self.render_organizer_tab(ui, accent),
                         ActiveTab::Markdown => self.render_markdown_tab(ui, ctx, accent),
                         ActiveTab::Compact => self.render_compact_tab(ui, ctx, accent),
@@ -2114,6 +2171,306 @@ impl RustyDeskApp {
                 let _ = self.data.save();
             }
         });
+    }
+
+    fn spawn_m3u_picker(&self, ctx: &egui::Context) {
+        let tx = self.bg_tx.clone();
+        let ctx_clone = ctx.clone();
+        std::thread::spawn(move || {
+            match music::pick_m3u_file_dialog() {
+                Ok(path) => {
+                    let _ = tx.send(BgEvent::M3uPicked(path));
+                }
+                Err(err) => {
+                    let _ = tx.send(BgEvent::M3uPickError(err));
+                }
+            }
+            ctx_clone.request_repaint();
+        });
+    }
+
+    fn import_m3u_from_path(&mut self, path: &std::path::Path) {
+        match music::parse_m3u_file(path) {
+            Ok((name, parsed_tracks)) => {
+                let new_tracks: Vec<NewMusicTrack> = parsed_tracks
+                    .into_iter()
+                    .map(|t| NewMusicTrack {
+                        title: t.title,
+                        uri: t.uri,
+                        duration_secs: t.duration_secs,
+                    })
+                    .collect();
+                let source_str = path.to_string_lossy().to_string();
+                match self
+                    .data
+                    .import_m3u_playlist(&name, Some(&source_str), &new_tracks)
+                {
+                    Ok(saved) => {
+                        let count = saved.track_count;
+                        let id = saved.id.clone();
+                        self.select_music_playlist(&id);
+                        self.music_status = Some(format!(
+                            "Playlist '{}' guardada ({count} pistas).",
+                            saved.name
+                        ));
+                        self.music_m3u_path_input.clear();
+                    }
+                    Err(e) => {
+                        self.music_status = Some(format!("⚠️ Error guardando playlist: {e}"));
+                    }
+                }
+            }
+            Err(err) => {
+                self.music_status = Some(format!("⚠️ {err}"));
+            }
+        }
+    }
+
+    fn select_music_playlist(&mut self, playlist_id: &str) {
+        self.music_selected_playlist_id = Some(playlist_id.to_string());
+        self.music_current_track_idx = None;
+        match self.data.load_playlist_tracks(playlist_id) {
+            Ok(tracks) => {
+                self.music_tracks = tracks;
+            }
+            Err(e) => {
+                self.music_tracks.clear();
+                self.music_status = Some(format!("⚠️ Error cargando pistas: {e}"));
+            }
+        }
+    }
+
+    fn play_music_track_at(&mut self, idx: usize) {
+        let Some(track) = self.music_tracks.get(idx).cloned() else {
+            return;
+        };
+        self.music_player.set_volume(self.music_volume);
+        match self.music_player.play(&track.uri) {
+            Ok(()) => {
+                self.music_current_track_idx = Some(idx);
+                self.music_status = Some(format!("▶ Reproduciendo: {}", track.title));
+            }
+            Err(e) => {
+                self.music_status = Some(format!("⚠️ {e}"));
+            }
+        }
+    }
+
+    fn play_next_music_track(&mut self) {
+        if self.music_tracks.is_empty() {
+            self.music_current_track_idx = None;
+            return;
+        }
+        let next = match self.music_current_track_idx {
+            Some(i) if i + 1 < self.music_tracks.len() => i + 1,
+            _ => {
+                self.music_current_track_idx = None;
+                self.music_status = Some("Playlist finalizada.".to_string());
+                return;
+            }
+        };
+        self.play_music_track_at(next);
+    }
+
+    fn render_music_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, accent: Color32) {
+        ui.label(RichText::new("Agregar playlist (.m3u / .m3u8)").strong());
+        ui.horizontal(|ui| {
+            let input_resp = ui.add_sized(
+                [ui.available_width() - 185.0, 26.0],
+                egui::TextEdit::singleline(&mut self.music_m3u_path_input)
+                    .hint_text("Ruta al archivo .m3u..."),
+            );
+            let enter = input_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (pixel_button(
+                ui,
+                PixelIcon::Save,
+                "Agregar",
+                accent,
+                Color32::from_rgb(15, 20, 32),
+                "Importar archivo .m3u a SQLite",
+            )
+            .clicked()
+                || enter)
+                && !self.music_m3u_path_input.trim().is_empty()
+            {
+                let p = PathBuf::from(self.music_m3u_path_input.trim());
+                self.import_m3u_from_path(&p);
+            }
+            if pixel_button(
+                ui,
+                PixelIcon::Attach,
+                "Elegir .m3u",
+                Color32::from_rgb(30, 41, 59),
+                Color32::WHITE,
+                "Buscar archivo .m3u en el sistema",
+            )
+            .clicked()
+            {
+                self.spawn_m3u_picker(ctx);
+            }
+        });
+
+        ui.add_space(6.0);
+        // Minimum playback controls: Play, Stop, Volume
+        let is_playing = self.music_player.is_playing();
+        egui::Frame::none()
+            .fill(Color32::from_rgb(20, 27, 45))
+            .rounding(8.0)
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if pixel_button(
+                        ui,
+                        PixelIcon::Play,
+                        "Play",
+                        Color32::from_rgb(22, 163, 74),
+                        Color32::WHITE,
+                        "Reproducir pista seleccionada o primera",
+                    )
+                    .clicked()
+                    {
+                        let idx = self.music_current_track_idx.unwrap_or(0);
+                        self.play_music_track_at(idx);
+                    }
+                    if pixel_button(
+                        ui,
+                        PixelIcon::Pause,
+                        "Stop",
+                        Color32::from_rgb(153, 27, 27),
+                        Color32::WHITE,
+                        "Detener reproducción",
+                    )
+                    .clicked()
+                    {
+                        self.music_player.stop();
+                        self.music_status = Some("Reproducción detenida.".to_string());
+                    }
+
+                    ui.add_space(8.0);
+                    ui.label("Vol:");
+                    let mut vol = self.music_volume;
+                    if ui
+                        .add(egui::Slider::new(&mut vol, 0..=100).suffix("%"))
+                        .changed()
+                    {
+                        self.music_volume = vol;
+                        self.music_player.set_volume(vol);
+                    }
+                });
+
+                let now_playing = match (is_playing, self.music_current_track_idx) {
+                    (true, Some(idx)) => self
+                        .music_tracks
+                        .get(idx)
+                        .map(|t| format!("▶ {}", t.title))
+                        .unwrap_or_else(|| "▶ Reproduciendo".to_string()),
+                    _ => self
+                        .music_status
+                        .clone()
+                        .unwrap_or_else(|| "Sin reproducción activa.".to_string()),
+                };
+                ui.add_space(4.0);
+                ui.label(RichText::new(now_playing).size(11.5).color(accent));
+            });
+
+        ui.add_space(6.0);
+        ui.separator();
+
+        // Saved playlists in SQLite
+        ui.label(RichText::new("Playlists guardadas (SQLite)").strong());
+        let mut selected_to_load: Option<String> = None;
+        let mut playlist_to_delete: Option<String> = None;
+
+        if self.data.playlists.is_empty() {
+            ui.label(
+                RichText::new("Todavía no agregaste archivos .m3u.")
+                    .size(11.5)
+                    .color(Color32::GRAY),
+            );
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("music_playlists_scroll")
+                .max_height(110.0)
+                .show(ui, |ui| {
+                    for pl in &self.data.playlists {
+                        let is_selected = self
+                            .music_selected_playlist_id
+                            .as_deref()
+                            .is_some_and(|id| id == pl.id);
+                        ui.horizontal(|ui| {
+                            let label = format!("{} ({} pistas)", pl.name, pl.track_count);
+                            if ui.selectable_label(is_selected, label).clicked() {
+                                selected_to_load = Some(pl.id.clone());
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if pixel_button(
+                                        ui,
+                                        PixelIcon::Clear,
+                                        "",
+                                        Color32::from_rgb(127, 29, 29),
+                                        Color32::WHITE,
+                                        "Eliminar playlist",
+                                    )
+                                    .clicked()
+                                    {
+                                        playlist_to_delete = Some(pl.id.clone());
+                                    }
+                                },
+                            );
+                        });
+                    }
+                });
+        }
+
+        if let Some(id) = selected_to_load {
+            self.select_music_playlist(&id);
+        }
+        if let Some(id) = playlist_to_delete {
+            if self.music_selected_playlist_id.as_deref() == Some(id.as_str()) {
+                self.music_player.stop();
+                self.music_selected_playlist_id = None;
+                self.music_tracks.clear();
+                self.music_current_track_idx = None;
+            }
+            let r = self.data.delete_playlist(&id);
+            self.report_persistence_result(r);
+        }
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.label(RichText::new("Pistas").strong());
+
+        let mut clicked_track: Option<usize> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("music_tracks_scroll")
+            .show(ui, |ui| {
+                if self.music_tracks.is_empty() {
+                    ui.label(
+                        RichText::new("Seleccioná una playlist para ver sus pistas.")
+                            .size(11.5)
+                            .color(Color32::GRAY),
+                    );
+                } else {
+                    for (idx, track) in self.music_tracks.iter().enumerate() {
+                        let active = self.music_current_track_idx == Some(idx);
+                        let label = match track.duration_secs {
+                            Some(d) => {
+                                format!("{}. {} ({}:{:02})", idx + 1, track.title, d / 60, d % 60)
+                            }
+                            None => format!("{}. {}", idx + 1, track.title),
+                        };
+                        if ui.selectable_label(active, label).clicked() {
+                            clicked_track = Some(idx);
+                        }
+                    }
+                }
+            });
+
+        if let Some(idx) = clicked_track {
+            self.play_music_track_at(idx);
+        }
     }
 
     fn render_organizer_tab(&mut self, ui: &mut egui::Ui, accent: Color32) {

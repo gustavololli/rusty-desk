@@ -7,10 +7,11 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "001_initial_schema",
-    sql: r#"
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "001_initial_schema",
+        sql: r#"
         CREATE TABLE IF NOT EXISTS conversations (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -132,7 +133,34 @@ const MIGRATIONS: &[Migration] = &[Migration {
             updated_at TEXT NOT NULL
         );
     "#,
-}];
+    },
+    Migration {
+        version: 2,
+        name: "0002_music_playlists",
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS music_playlists (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            source_path TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS music_tracks (
+            id TEXT PRIMARY KEY,
+            playlist_id TEXT NOT NULL REFERENCES music_playlists(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            uri TEXT NOT NULL,
+            duration_secs INTEGER,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_music_tracks_playlist_pos
+            ON music_tracks(playlist_id, position ASC);
+    "#,
+    },
+];
 
 pub fn run_migrations(conn: &mut Connection) -> anyhow::Result<()> {
     conn.execute_batch(

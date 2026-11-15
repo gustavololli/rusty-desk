@@ -1,6 +1,7 @@
 mod ai;
 mod config;
 mod converter;
+mod music;
 mod organizer;
 mod persistence;
 mod sfx;
