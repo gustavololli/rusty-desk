@@ -97,7 +97,8 @@ pub struct AiResponse {
 
 #[async_trait]
 pub trait AiProvider: Send + Sync {
-    async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef]) -> anyhow::Result<AiResponse>;
+    async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef])
+        -> anyhow::Result<AiResponse>;
     async fn transcribe(&self, wav_bytes: Vec<u8>) -> anyhow::Result<String>;
 }
 
@@ -149,7 +150,11 @@ struct ApiTranscribeResponse {
 
 #[async_trait]
 impl AiProvider for OpenAiCompatibleProvider {
-    async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef]) -> anyhow::Result<AiResponse> {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+    ) -> anyhow::Result<AiResponse> {
         let url = format!("{}/chat/completions", self.base_url);
         let mut body = json!({
             "model": self.model,
@@ -191,9 +196,8 @@ impl AiProvider for OpenAiCompatibleProvider {
                 if !retry_status.is_success() {
                     anyhow::bail!("Error de API ({retry_status}): {retry_text}");
                 }
-                let parsed: ApiChatResponse = serde_json::from_str(&retry_text).map_err(|e| {
-                    anyhow::anyhow!("Respuesta JSON inválida: {e} — {retry_text}")
-                })?;
+                let parsed: ApiChatResponse = serde_json::from_str(&retry_text)
+                    .map_err(|e| anyhow::anyhow!("Respuesta JSON inválida: {e} — {retry_text}"))?;
                 let first = parsed
                     .choices
                     .into_iter()
@@ -259,7 +263,11 @@ pub struct MockProvider;
 
 #[async_trait]
 impl AiProvider for MockProvider {
-    async fn chat(&self, messages: &[ChatMessage], _tools: &[ToolDef]) -> anyhow::Result<AiResponse> {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        _tools: &[ToolDef],
+    ) -> anyhow::Result<AiResponse> {
         // If the last message is a tool result, summarize all tool results from the latest turn.
         if let Some(last) = messages.last() {
             if last.role == "tool" {
@@ -269,11 +277,7 @@ impl AiProvider for MockProvider {
                     .take_while(|m| m.role == "tool")
                     .filter_map(|m| m.content.as_deref())
                     .collect();
-                let summary = results
-                    .into_iter()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join(" | ");
+                let summary = results.into_iter().rev().collect::<Vec<_>>().join(" | ");
                 return Ok(AiResponse {
                     content: Some(format!("Listo (Modo Local): {summary}")),
                     tool_calls: vec![],
@@ -303,9 +307,17 @@ impl AiProvider for MockProvider {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(user_text);
-            calls.push(make_mock_call("add_task", json!({ "title": title }), calls.len()));
+            calls.push(make_mock_call(
+                "add_task",
+                json!({ "title": title }),
+                calls.len(),
+            ));
         }
-        if lower.contains("agua") || lower.contains("vaso") || lower.contains("hábito") || lower.contains("habito") {
+        if lower.contains("agua")
+            || lower.contains("vaso")
+            || lower.contains("hábito")
+            || lower.contains("habito")
+        {
             calls.push(make_mock_call(
                 "log_habit",
                 json!({ "name": "Vasos de agua", "delta": 1 }),
@@ -316,16 +328,35 @@ impl AiProvider for MockProvider {
             if lower.contains("pausa") || lower.contains("deten") || lower.contains("para") {
                 calls.push(make_mock_call("pause_pomodoro", json!({}), calls.len()));
             } else {
-                calls.push(make_mock_call("start_pomodoro", json!({ "minutes": 25 }), calls.len()));
+                calls.push(make_mock_call(
+                    "start_pomodoro",
+                    json!({ "minutes": 25 }),
+                    calls.len(),
+                ));
             }
         }
         if lower.contains("deshacer") || lower.contains("undo") {
-            calls.push(make_mock_call("undo_organize_desktop", json!({}), calls.len()));
-        } else if lower.contains("ordena") || lower.contains("organiza") || lower.contains("escritorio") {
+            calls.push(make_mock_call(
+                "undo_organize_desktop",
+                json!({}),
+                calls.len(),
+            ));
+        } else if lower.contains("ordena")
+            || lower.contains("organiza")
+            || lower.contains("escritorio")
+        {
             if lower.contains("aplica") || lower.contains("confirma") || lower.contains("ejecuta") {
-                calls.push(make_mock_call("apply_organize_desktop", json!({}), calls.len()));
+                calls.push(make_mock_call(
+                    "apply_organize_desktop",
+                    json!({}),
+                    calls.len(),
+                ));
             } else {
-                calls.push(make_mock_call("preview_organize_desktop", json!({}), calls.len()));
+                calls.push(make_mock_call(
+                    "preview_organize_desktop",
+                    json!({}),
+                    calls.len(),
+                ));
             }
         }
 
@@ -400,7 +431,11 @@ struct GeminiContent {
 
 #[async_trait]
 impl AiProvider for GoogleGeminiProvider {
-    async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef]) -> anyhow::Result<AiResponse> {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDef],
+    ) -> anyhow::Result<AiResponse> {
         let url = format!("{}/models/{}:generateContent", self.base_url, self.model);
 
         let system_text: String = messages
@@ -433,8 +468,8 @@ impl AiProvider for GoogleGeminiProvider {
                         }
                         if let Some(tcs) = &msg.tool_calls {
                             for tc in tcs {
-                                let args_val: Value =
-                                    serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+                                let args_val: Value = serde_json::from_str(&tc.function.arguments)
+                                    .unwrap_or(json!({}));
                                 let mut part_obj = json!({
                                     "functionCall": {
                                         "name": tc.function.name,
@@ -549,13 +584,26 @@ impl AiProvider for GoogleGeminiProvider {
         let mut tool_calls = Vec::new();
         for (idx, part) in raw_parts.iter().enumerate() {
             if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                if !t.is_empty() && !part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if !t.is_empty()
+                    && !part
+                        .get("thought")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                {
                     text_out.push(t.to_string());
                 }
             }
             if let Some(fc) = part.get("functionCall") {
-                let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let args_str = fc.get("args").cloned().unwrap_or_else(|| json!({})).to_string();
+                let name = fc
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args_str = fc
+                    .get("args")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}))
+                    .to_string();
                 let sig = part
                     .get("thoughtSignature")
                     .or_else(|| part.get("thought_signature"))
@@ -639,7 +687,9 @@ mod tests {
         let mock = MockProvider;
         let resp = mock
             .chat(
-                &[ChatMessage::user("Anota una tarea: pan y tomé un vaso de agua")],
+                &[ChatMessage::user(
+                    "Anota una tarea: pan y tomé un vaso de agua",
+                )],
                 &[],
             )
             .await
@@ -667,7 +717,10 @@ mod tests {
             .await
             .unwrap();
         assert!(resumed.tool_calls.is_empty());
-        assert!(resumed.content.unwrap().contains("Tarea agregada | Agua 1/8"));
+        assert!(resumed
+            .content
+            .unwrap()
+            .contains("Tarea agregada | Agua 1/8"));
 
         assert!(mock
             .chat(&[ChatMessage::user("por favor simular error")], &[])
@@ -734,7 +787,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].function.name, "list_tasks");
-        assert_eq!(resp.tool_calls[0].thought_signature.as_deref(), Some("sig-123"));
+        assert_eq!(
+            resp.tool_calls[0].thought_signature.as_deref(),
+            Some("sig-123")
+        );
         assert!(resp.raw_gemini_parts.is_some());
     }
 }

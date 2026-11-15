@@ -92,7 +92,10 @@ pub fn convert_file_to_markdown(path: &Path) -> Result<String, String> {
         return Err(format!("El archivo no existe: {}", path.display()));
     }
     if !path.is_file() {
-        return Err(format!("La ruta no es un archivo válido: {}", path.display()));
+        return Err(format!(
+            "La ruta no es un archivo válido: {}",
+            path.display()
+        ));
     }
 
     let path_str = path
@@ -119,10 +122,7 @@ pub fn convert_file_to_markdown(path: &Path) -> Result<String, String> {
                 return extract_pdf_with_pdftotext(path);
             }
 
-            let ext_plain = ext
-                .as_deref()
-                .unwrap_or("")
-                .trim_start_matches('.');
+            let ext_plain = ext.as_deref().unwrap_or("").trim_start_matches('.');
             let plain_exts = [
                 "txt", "md", "markdown", "json", "toml", "yaml", "yml", "log", "rs", "py", "js",
                 "ts", "sh", "ini", "cfg",
@@ -156,7 +156,9 @@ fn extract_pdf_with_pdftotext(path: &Path) -> Result<String, String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Error al extraer texto del PDF con pdftotext: {stderr}"));
+        return Err(format!(
+            "Error al extraer texto del PDF con pdftotext: {stderr}"
+        ));
     }
 
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();

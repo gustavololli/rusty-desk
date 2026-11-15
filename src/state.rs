@@ -314,7 +314,14 @@ impl AppData {
                 HabitItem::new("Pausas activas", "🧘", 4),
             ];
             for h in &defaults {
-                db.upsert_habit(&h.id, &h.name, &h.icon, h.daily_goal, h.current_count, h.last_date)?;
+                db.upsert_habit(
+                    &h.id,
+                    &h.name,
+                    &h.icon,
+                    h.daily_goal,
+                    h.current_count,
+                    h.last_date,
+                )?;
             }
             habits = defaults;
         }
@@ -359,7 +366,14 @@ impl AppData {
             db.upsert_task(&t.id, &t.title, t.done, &t.created_at)?;
         }
         for h in &self.habits {
-            db.upsert_habit(&h.id, &h.name, &h.icon, h.daily_goal, h.current_count, h.last_date)?;
+            db.upsert_habit(
+                &h.id,
+                &h.name,
+                &h.icon,
+                h.daily_goal,
+                h.current_count,
+                h.last_date,
+            )?;
         }
         db.save_pomodoro(
             phase_to_str(self.pomodoro.phase),
@@ -673,8 +687,13 @@ mod tests {
         let conv_id = "conv-struct-1";
 
         let u1 = ChatMessage::user("Organizá mis archivos");
-        data.record_chat_message(conv_id, Some("Organizá mis archivos"), &u1, MessageKind::Text)
-            .unwrap();
+        data.record_chat_message(
+            conv_id,
+            Some("Organizá mis archivos"),
+            &u1,
+            MessageKind::Text,
+        )
+        .unwrap();
 
         let tc1 = ToolCall {
             id: "call-preview-1".to_string(),
@@ -690,7 +709,9 @@ mod tests {
             content: None,
             tool_calls: Some(vec![tc1]),
             tool_call_id: None,
-            raw_gemini_parts: Some(vec![serde_json::json!({"functionCall":{"name":"preview_organize_desktop","args":{}},"thoughtSignature":"sig-xyz"})]),
+            raw_gemini_parts: Some(vec![
+                serde_json::json!({"functionCall":{"name":"preview_organize_desktop","args":{}},"thoughtSignature":"sig-xyz"}),
+            ]),
         };
         data.record_chat_message(conv_id, None, &a_tc1, MessageKind::ToolCall)
             .unwrap();
@@ -704,9 +725,7 @@ mod tests {
             .unwrap();
 
         // Reload with max_turns = 2 -> drops oldest user turn, keeps atomic tool_call + tool_result together
-        let (ui_entries, tech_history) = data
-            .load_conversation_history(conv_id, "SYS", 2)
-            .unwrap();
+        let (ui_entries, tech_history) = data.load_conversation_history(conv_id, "SYS", 2).unwrap();
 
         assert_eq!(ui_entries.len(), 2); // User + Assistant text
         assert_eq!(ui_entries[0].text, "Organizá mis archivos");
@@ -722,11 +741,18 @@ mod tests {
         assert!(tech_history[1].tool_calls.is_some());
         assert!(tech_history[1].raw_gemini_parts.is_some());
         assert_eq!(tech_history[2].role, "tool");
-        assert_eq!(tech_history[2].tool_call_id.as_deref(), Some("call-preview-1"));
+        assert_eq!(
+            tech_history[2].tool_call_id.as_deref(),
+            Some("call-preview-1")
+        );
         assert_eq!(tech_history[3].role, "assistant");
 
-        let execs = data.db.as_ref().unwrap().list_tool_executions(conv_id).unwrap();
+        let execs = data
+            .db
+            .as_ref()
+            .unwrap()
+            .list_tool_executions(conv_id)
+            .unwrap();
         assert!(execs.is_empty());
     }
 }
-

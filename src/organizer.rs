@@ -79,7 +79,11 @@ impl FileOrganizer {
             });
         }
 
-        plans.sort_by(|a, b| a.category.cmp(&b.category).then(a.file_name.cmp(&b.file_name)));
+        plans.sort_by(|a, b| {
+            a.category
+                .cmp(&b.category)
+                .then(a.file_name.cmp(&b.file_name))
+        });
         self.last_preview = plans.clone();
         Ok(plans)
     }
@@ -108,10 +112,8 @@ impl FileOrganizer {
                     batch.created_dirs.push(parent.to_path_buf());
                 }
             }
-            let final_dest = unique_dest_path(
-                plan.to.parent().unwrap_or(target_dir),
-                &plan.file_name,
-            );
+            let final_dest =
+                unique_dest_path(plan.to.parent().unwrap_or(target_dir), &plan.file_name);
             fs::rename(&plan.from, &final_dest)?;
             batch.moves.push((plan.from.clone(), final_dest));
         }
@@ -207,4 +209,3 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }
-

@@ -126,7 +126,10 @@ pub fn migrate_json_if_needed(
     }
 
     let raw = fs::read_to_string(json_path).map_err(|e| {
-        anyhow::anyhow!("No se pudo leer '{}' para migración: {e}", json_path.display())
+        anyhow::anyhow!(
+            "No se pudo leer '{}' para migración: {e}",
+            json_path.display()
+        )
     })?;
 
     if raw.trim().is_empty() {
@@ -286,7 +289,8 @@ pub fn migrate_json_if_needed(
     let db_tasks: usize = tx.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
     let db_habits: usize = tx.query_row("SELECT COUNT(*) FROM habits", [], |r| r.get(0))?;
     let db_convs: usize = tx.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?;
-    if db_tasks < imported_tasks || db_habits < imported_habits || db_convs < imported_conversations {
+    if db_tasks < imported_tasks || db_habits < imported_habits || db_convs < imported_conversations
+    {
         anyhow::bail!("Validación de migración fallida: conteo inconsistente de registros.");
     }
 

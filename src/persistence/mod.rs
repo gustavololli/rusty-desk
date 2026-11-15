@@ -711,7 +711,10 @@ mod tests {
         fs::write(&partial_json, r#"{"tasks":[{"title":"Solo título"}]}"#).unwrap();
         let (db_partial, out_partial) =
             Database::open_with_json_migration(&partial_db, &partial_json).unwrap();
-        assert!(matches!(out_partial, MigrationOutcome::Migrated { tasks: 1, .. }));
+        assert!(matches!(
+            out_partial,
+            MigrationOutcome::Migrated { tasks: 1, .. }
+        ));
         assert_eq!(db_partial.list_tasks().unwrap()[0].title, "Solo título");
 
         let _ = fs::remove_dir_all(&dir);

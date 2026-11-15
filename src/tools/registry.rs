@@ -183,9 +183,17 @@ pub fn select_tools_for_message(user_text: &str) -> Vec<ToolDef> {
     let lower = user_text.to_lowercase();
     let mut categories = Vec::new();
 
-    if ["tarea", "pendiente", "anota", "recorda", "comple", "task", "lista"]
-        .iter()
-        .any(|k| lower.contains(k))
+    if [
+        "tarea",
+        "pendiente",
+        "anota",
+        "recorda",
+        "comple",
+        "task",
+        "lista",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
     {
         categories.push("tasks");
     }
@@ -195,21 +203,41 @@ pub fn select_tools_for_message(user_text: &str) -> Vec<ToolDef> {
     {
         categories.push("habits");
     }
-    if ["pomodoro", "enfoque", "pausa", "concentr", "descanso", "timer"]
-        .iter()
-        .any(|k| lower.contains(k))
+    if [
+        "pomodoro", "enfoque", "pausa", "concentr", "descanso", "timer",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
     {
         categories.push("pomodoro");
     }
-    if ["ordena", "organiza", "escritorio", "deshacer", "undo", "archivo"]
-        .iter()
-        .any(|k| lower.contains(k))
+    if [
+        "ordena",
+        "organiza",
+        "escritorio",
+        "deshacer",
+        "undo",
+        "archivo",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
     {
         categories.push("organizer");
     }
-    if ["markdown", "markitdown", "pdf", "docx", "xlsx", "pptx", "convert", "compact", ".md", "/"]
-        .iter()
-        .any(|k| lower.contains(k))
+    if [
+        "markdown",
+        "markitdown",
+        "pdf",
+        "docx",
+        "xlsx",
+        "pptx",
+        "convert",
+        "compact",
+        ".md",
+        "/",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
     {
         categories.push("markdown");
     }

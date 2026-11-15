@@ -179,14 +179,7 @@ impl ToolEngine {
         // 5. Execute business logic
         match Self::execute_inner(&req.tool_name, &req.args, data, organizer, config) {
             Ok((ui_msg, llm_msg, mood)) => {
-                Self::audit(
-                    data,
-                    &req,
-                    "success",
-                    Some(&llm_msg),
-                    Some(&ui_msg),
-                    None,
-                );
+                Self::audit(data, &req, "success", Some(&llm_msg), Some(&ui_msg), None);
                 ToolOutput {
                     status: ToolStatus::Success,
                     ui_message: ui_msg,
@@ -293,7 +286,11 @@ impl ToolEngine {
                 Ok((full, compact, None))
             }
             "log_habit" => {
-                let query = args["name"].as_str().unwrap_or("agua").trim().to_lowercase();
+                let query = args["name"]
+                    .as_str()
+                    .unwrap_or("agua")
+                    .trim()
+                    .to_lowercase();
                 let delta = args["delta"].as_i64().unwrap_or(1).max(1) as i32;
                 if let Some(idx) = data
                     .habits
@@ -303,7 +300,10 @@ impl ToolEngine {
                     data.log_habit_delta(idx, delta)
                         .map_err(|e| format!("Error registrando hábito en SQLite: {e}"))?;
                     let h = &data.habits[idx];
-                    let msg = format!("{} {}: {}/{} hoy.", h.icon, h.name, h.current_count, h.daily_goal);
+                    let msg = format!(
+                        "{} {}: {}/{} hoy.",
+                        h.icon, h.name, h.current_count, h.daily_goal
+                    );
                     Ok((msg.clone(), msg, Some(AssistantMood::Happy)))
                 } else {
                     Err(format!("No encontré el hábito \"{query}\"."))
@@ -384,7 +384,8 @@ impl ToolEngine {
             "convert_to_markdown" => {
                 let path_str = args["path"].as_str().unwrap_or("").trim();
                 let save_file = args["save_file"].as_bool().unwrap_or(true);
-                let compact_mode = converter::CompactionMode::from_str_opt(args["compact"].as_str());
+                let compact_mode =
+                    converter::CompactionMode::from_str_opt(args["compact"].as_str());
                 let source_path = Path::new(path_str);
 
                 let raw_markdown = converter::convert_file_to_markdown(source_path)?;
@@ -444,14 +445,18 @@ fn validate_args(spec: &ToolSpec, args: &Value) -> Result<(), String> {
             }
             if let Some(d) = args.get("delta").and_then(|v| v.as_i64()) {
                 if d <= 0 || d > 1000 {
-                    return Err("Argumento inválido: 'delta' debe estar entre 1 y 1000.".to_string());
+                    return Err(
+                        "Argumento inválido: 'delta' debe estar entre 1 y 1000.".to_string()
+                    );
                 }
             }
         }
         "start_pomodoro" => {
             if let Some(m) = args.get("minutes").and_then(|v| v.as_i64()) {
                 if m < 1 || m > 180 {
-                    return Err("Argumento inválido: 'minutes' debe estar entre 1 y 180.".to_string());
+                    return Err(
+                        "Argumento inválido: 'minutes' debe estar entre 1 y 180.".to_string()
+                    );
                 }
             }
         }
@@ -520,7 +525,8 @@ mod tests {
         let mut data = test_data();
         let mut org = FileOrganizer::default();
         let mut cfg = AppConfig::default();
-        let temp_dir = std::env::temp_dir().join(format!("rusty_desk_engine_test_{}", Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("rusty_desk_engine_test_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         std::fs::write(temp_dir.join("nota.txt"), "hola").unwrap();
         cfg.organize_target_dir = temp_dir.to_string_lossy().to_string();

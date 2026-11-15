@@ -115,9 +115,7 @@ pub fn parse_local_command(input: &str) -> Option<LocalCommand> {
                 name: "undo_organize_desktop",
                 args: json!({}),
             },
-            _ => LocalCommand::Invalid(
-                "Uso: `/ordenar [preview|aplicar|deshacer]`".to_string(),
-            ),
+            _ => LocalCommand::Invalid("Uso: `/ordenar [preview|aplicar|deshacer]`".to_string()),
         },
         "/md" | "/markitdown" => {
             if rest.is_empty() {
