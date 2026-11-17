@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocalCommand {
     Tool { name: &'static str, args: Value },
+    External { name: &'static str, args: Value },
     PlayMusic(Option<String>),
     StopMusic,
     Weather(Option<String>),
@@ -23,7 +24,10 @@ const HELP_TEXT: &str = "Comandos locales (sin gastar tokens de IA):
 - `/musica <url> [nombre]` — Guarda una URL de música/radio en SQLite
 - `/play [nombre|número]` — Reproduce una pista o URL guardada
 - `/stop` — Detiene la reproducción de música
-- `/clima [ciudad]` — Consulta el clima actual (Open-Meteo, gratis)
+- `/clima [ciudad]` o `/weather [ciudad]` — Consulta el clima (Open-Meteo, gratis)
+- `/search <consulta>` — Busca en Internet (Tavily / Brave)
+- `/fetch <url>` — Lee el contenido de una URL pública
+- `/exchange <monto> <base> <destino>` — Cotización de referencia (Frankfurter)
 - `/ayuda` — Muestra esta ayuda";
 
 /// Parses explicit `/` slash commands so deterministic operations bypass the LLM completely.
@@ -159,6 +163,60 @@ pub fn parse_local_command(input: &str) -> Option<LocalCommand> {
         "/clima" | "/weather" => {
             let city = (!rest.is_empty()).then(|| rest.to_string());
             LocalCommand::Weather(city)
+        }
+        "/search" | "/buscar" => {
+            if rest.is_empty() {
+                LocalCommand::Invalid("Uso: `/search <consulta>`".to_string())
+            } else {
+                LocalCommand::External {
+                    name: "web_search",
+                    args: json!({ "query": rest, "max_results": 5 }),
+                }
+            }
+        }
+        "/fetch" | "/leer" => {
+            if rest.is_empty() {
+                LocalCommand::Invalid("Uso: `/fetch <https://...>`".to_string())
+            } else {
+                LocalCommand::External {
+                    name: "web_fetch",
+                    args: json!({ "url": rest }),
+                }
+            }
+        }
+        "/exchange" | "/cambio" => {
+            let tokens: Vec<&str> = rest.split_whitespace().collect();
+            if tokens.len() == 3 {
+                if let Ok(amount) = tokens[0].replace(',', ".").parse::<f64>() {
+                    LocalCommand::External {
+                        name: "get_exchange_rate",
+                        args: json!({
+                            "amount": amount,
+                            "base": tokens[1].to_uppercase(),
+                            "target": tokens[2].to_uppercase(),
+                        }),
+                    }
+                } else {
+                    LocalCommand::Invalid(
+                        "Uso: `/exchange <monto> <base> <destino>` (ej: `/exchange 250 USD EUR`)"
+                            .to_string(),
+                    )
+                }
+            } else if tokens.len() == 2 {
+                LocalCommand::External {
+                    name: "get_exchange_rate",
+                    args: json!({
+                        "amount": 1.0,
+                        "base": tokens[0].to_uppercase(),
+                        "target": tokens[1].to_uppercase(),
+                    }),
+                }
+            } else {
+                LocalCommand::Invalid(
+                    "Uso: `/exchange <monto> <base> <destino>` (ej: `/exchange 250 USD EUR`)"
+                        .to_string(),
+                )
+            }
         }
         _ => LocalCommand::Invalid(format!(
             "Comando desconocido `{cmd}`. Escribí `/ayuda` para ver los comandos locales."

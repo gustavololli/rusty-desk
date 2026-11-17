@@ -8,8 +8,13 @@ use crate::ai::{
 };
 use crate::config::{
     clamp_pet_position, clamp_window_position, AppConfig, IslandPosition, PetIntensity, PetSize,
+    SearchProviderId,
 };
 use crate::converter::{self, CompactionMode};
+use crate::free_tools::{
+    format_search_response_for_user_and_llm, FreeToolsEngine, ProviderHealthStatus,
+    TurnExternalLimits,
+};
 use crate::music::{self, MusicPlayer};
 use crate::organizer::FileOrganizer;
 use crate::persistence::{ConversationSummary, MessageKind, NewMusicTrack, PersistedTrack};
@@ -58,6 +63,7 @@ enum SettingsSubTab {
     Ai,
     Position,
     Pet,
+    ExternalTools,
 }
 
 enum BgEvent {
@@ -84,6 +90,18 @@ enum BgEvent {
     M3uPicked(Option<PathBuf>),
     M3uPickError(String),
     WeatherResult(Result<String, String>),
+    ExternalCommandResult {
+        #[allow(dead_code)]
+        tool_name: String,
+        result: Result<String, String>,
+    },
+    ExternalAiToolsDone {
+        results: Vec<(String, String, bool)>,
+        history_snapshot: Vec<ChatMessage>,
+        new_mood: Option<AssistantMood>,
+        waiting_for_confirmation: bool,
+    },
+    ProviderTestResult(String),
 }
 
 pub struct RustyDeskApp {
@@ -151,6 +169,9 @@ pub struct RustyDeskApp {
     current_monitor: MonitorRect,
     session_kind: SessionKind,
     settings_sub_tab: SettingsSubTab,
+    free_tools: Arc<FreeToolsEngine>,
+    turn_limits: TurnExternalLimits,
+    provider_test_status: Option<String>,
 
     bg_tx: Sender<BgEvent>,
     bg_rx: Receiver<BgEvent>,
@@ -231,6 +252,11 @@ impl RustyDeskApp {
             AssistantMood::Idle
         };
 
+        let free_tools = FreeToolsEngine::open_default().unwrap_or_else(|_| {
+            let mem = crate::persistence::Database::open_in_memory()
+                .expect("No se pudo abrir DB en memoria");
+            FreeToolsEngine::with_database(mem)
+        });
         let mut app = Self {
             rt: tokio::runtime::Runtime::new().expect("No se pudo iniciar Tokio"),
             config,
@@ -289,6 +315,9 @@ impl RustyDeskApp {
             current_monitor,
             session_kind,
             settings_sub_tab: SettingsSubTab::default(),
+            free_tools,
+            turn_limits: TurnExternalLimits::default(),
+            provider_test_status: None,
             bg_tx,
             bg_rx,
             global_cursor,
@@ -362,6 +391,8 @@ impl RustyDeskApp {
         self.report_persistence_result(persist_res);
         sfx::play(SfxEvent::MessageSent, self.config.sfx_enabled);
 
+        self.turn_limits = TurnExternalLimits::default();
+
         // Intercept explicit `/` commands locally (0 LLM tokens!)
         if let Some(local_cmd) = parse_local_command(&trimmed) {
             match local_cmd {
@@ -427,13 +458,36 @@ impl RustyDeskApp {
                         .to_string();
                     let tx = self.bg_tx.clone();
                     let ctx_clone = ctx.clone();
+                    let free_tools = Arc::clone(&self.free_tools);
+                    let ext_cfg = self.config.external_tools.clone();
                     self.is_thinking = true;
                     self.mood = AssistantMood::Thinking;
                     self.rt.spawn(async move {
-                        let res = crate::weather::fetch_weather(&target_city)
+                        let res = free_tools
+                            .execute_weather(&ext_cfg, &target_city)
                             .await
-                            .map(|r| r.format_message());
+                            .map_err(|e| e.to_string());
                         let _ = tx.send(BgEvent::WeatherResult(res));
+                        ctx_clone.request_repaint();
+                    });
+                }
+                LocalCommand::External { name, args } => {
+                    if name == "web_search" {
+                        self.chat_ui
+                            .push(UiChatEntry::assistant("🔎 Buscando en Internet..."));
+                    }
+                    let tx = self.bg_tx.clone();
+                    let ctx_clone = ctx.clone();
+                    let free_tools = Arc::clone(&self.free_tools);
+                    let ext_cfg = self.config.external_tools.clone();
+                    let tool_name = name.to_string();
+                    self.is_thinking = true;
+                    self.mood = AssistantMood::Thinking;
+                    self.rt.spawn(async move {
+                        let result =
+                            execute_external_tool_async(&free_tools, &ext_cfg, &tool_name, &args)
+                                .await;
+                        let _ = tx.send(BgEvent::ExternalCommandResult { tool_name, result });
                         ctx_clone.request_repaint();
                     });
                 }
@@ -598,10 +652,35 @@ impl RustyDeskApp {
 
                         let mut new_mood = None;
                         let mut waiting_for_confirmation = false;
+                        let mut external_batch: Vec<(String, String, serde_json::Value)> =
+                            Vec::new();
                         for tc in &tool_calls {
                             let args_val: serde_json::Value =
                                 serde_json::from_str(&tc.function.arguments)
                                     .unwrap_or(serde_json::Value::Null);
+                            if is_external_tool_name(&tc.function.name) {
+                                if let Err(limit_err) =
+                                    self.turn_limits.try_acquire(&tc.function.name)
+                                {
+                                    let tool_msg =
+                                        ChatMessage::tool_result(&tc.id, limit_err.to_string());
+                                    let r = self.data.record_chat_message(
+                                        &self.current_chat_id,
+                                        None,
+                                        &tool_msg,
+                                        MessageKind::ToolError,
+                                    );
+                                    self.report_persistence_result(r);
+                                    history_snapshot.push(tool_msg);
+                                } else {
+                                    external_batch.push((
+                                        tc.id.clone(),
+                                        tc.function.name.clone(),
+                                        args_val,
+                                    ));
+                                }
+                                continue;
+                            }
                             let out = ToolEngine::execute(
                                 ToolRequest {
                                     tool_name: tc.function.name.clone(),
@@ -660,6 +739,44 @@ impl RustyDeskApp {
                                     history_snapshot.push(tool_msg);
                                 }
                             }
+                        }
+
+                        if !external_batch.is_empty() {
+                            if external_batch
+                                .iter()
+                                .any(|(_, name, _)| name == "web_search")
+                            {
+                                self.chat_ui
+                                    .push(UiChatEntry::assistant("🔎 Buscando en Internet..."));
+                            }
+                            let free_tools = Arc::clone(&self.free_tools);
+                            let ext_cfg = self.config.external_tools.clone();
+                            let tx = self.bg_tx.clone();
+                            let ctx_clone = ctx.clone();
+                            self.rt.spawn(async move {
+                                let mut results = Vec::new();
+                                for (tc_id, name, args) in external_batch {
+                                    match execute_external_tool_async(
+                                        &free_tools,
+                                        &ext_cfg,
+                                        &name,
+                                        &args,
+                                    )
+                                    .await
+                                    {
+                                        Ok(text) => results.push((tc_id, text, false)),
+                                        Err(err) => results.push((tc_id, err, true)),
+                                    }
+                                }
+                                let _ = tx.send(BgEvent::ExternalAiToolsDone {
+                                    results,
+                                    history_snapshot,
+                                    new_mood,
+                                    waiting_for_confirmation,
+                                });
+                                ctx_clone.request_repaint();
+                            });
+                            continue;
                         }
 
                         if let Some(m) = new_mood {
@@ -801,6 +918,70 @@ impl RustyDeskApp {
                         MessageKind::Text,
                     );
                     self.report_persistence_result(r);
+                    sfx::play(SfxEvent::MessageReceived, self.config.sfx_enabled);
+                }
+                BgEvent::ExternalCommandResult {
+                    tool_name: _,
+                    result,
+                } => {
+                    self.is_thinking = false;
+                    let msg = match result {
+                        Ok(text) => {
+                            self.mood = AssistantMood::Happy;
+                            text
+                        }
+                        Err(err) => {
+                            self.mood = AssistantMood::Idle;
+                            format!("⚠️ {err}")
+                        }
+                    };
+                    let reply = ChatMessage::assistant_text(&msg);
+                    self.chat_ui.push(UiChatEntry::assistant(&msg));
+                    self.chat_history.push(reply.clone());
+                    let r = self.data.record_chat_message(
+                        &self.current_chat_id,
+                        None,
+                        &reply,
+                        MessageKind::Text,
+                    );
+                    self.report_persistence_result(r);
+                    sfx::play(SfxEvent::MessageReceived, self.config.sfx_enabled);
+                }
+                BgEvent::ExternalAiToolsDone {
+                    results,
+                    mut history_snapshot,
+                    new_mood,
+                    waiting_for_confirmation,
+                } => {
+                    for (tc_id, text, is_err) in results {
+                        let kind = if is_err {
+                            MessageKind::ToolError
+                        } else {
+                            MessageKind::ToolResult
+                        };
+                        let tool_msg = ChatMessage::tool_result(&tc_id, text);
+                        let r = self.data.record_chat_message(
+                            &self.current_chat_id,
+                            None,
+                            &tool_msg,
+                            kind,
+                        );
+                        self.report_persistence_result(r);
+                        history_snapshot.push(tool_msg);
+                    }
+                    if let Some(m) = new_mood {
+                        self.mood = m;
+                    }
+                    self.chat_history = history_snapshot;
+                    if waiting_for_confirmation {
+                        self.is_thinking = false;
+                        self.mood = AssistantMood::Idle;
+                    } else {
+                        self.spawn_ai_turn(ctx.clone(), None);
+                    }
+                }
+                BgEvent::ProviderTestResult(msg) => {
+                    self.provider_test_status = Some(msg);
                 }
             }
         }
@@ -4197,6 +4378,7 @@ impl RustyDeskApp {
                 ui.horizontal_wrapped(|ui| {
                     for (tab, label) in [
                         (SettingsSubTab::Ai, "IA y Audio"),
+                        (SettingsSubTab::ExternalTools, "Herramientas"),
                         (SettingsSubTab::Position, "Posición e Isla"),
                         (SettingsSubTab::Pet, "Mascota"),
                     ] {
@@ -4237,6 +4419,9 @@ impl RustyDeskApp {
             .auto_shrink([false, false])
             .show(ui, |ui| match self.settings_sub_tab {
                 SettingsSubTab::Ai => self.render_settings_ai_section(ui),
+                SettingsSubTab::ExternalTools => {
+                    self.render_settings_external_tools_section(ui, accent)
+                }
                 SettingsSubTab::Position => self.render_settings_position_section(ui),
                 SettingsSubTab::Pet => self.render_settings_pet_section(ui),
             });
@@ -4257,6 +4442,185 @@ impl RustyDeskApp {
                 Err(e) => self.status_banner = Some(format!("Error al guardar: {e}")),
             }
         }
+    }
+
+    fn render_settings_external_tools_section(&mut self, ui: &mut egui::Ui, accent: Color32) {
+        let ext = &self.config.external_tools;
+        let (tav_status, tav_used, tav_budget) = self
+            .free_tools
+            .provider_status(ext, SearchProviderId::Tavily);
+        let (brv_status, brv_used, brv_budget) = self
+            .free_tools
+            .provider_status(ext, SearchProviderId::Brave);
+
+        ui.label(RichText::new("Herramientas externas (Free Tools Engine)").strong());
+        ui.add_space(4.0);
+
+        egui::Grid::new("external_tools_status_grid")
+            .striped(true)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("Herramienta").strong().size(11.5));
+                ui.label(RichText::new("Proveedor").strong().size(11.5));
+                ui.label(RichText::new("Estado").strong().size(11.5));
+                ui.end_row();
+
+                let status_color = |st: ProviderHealthStatus| match st {
+                    ProviderHealthStatus::Available => Color32::from_rgb(52, 211, 153),
+                    ProviderHealthStatus::NotConfigured | ProviderHealthStatus::Disabled => {
+                        Color32::GRAY
+                    }
+                    ProviderHealthStatus::QuotaExhausted
+                    | ProviderHealthStatus::TemporaryError
+                    | ProviderHealthStatus::NeedsVerification => Color32::from_rgb(250, 204, 21),
+                };
+
+                ui.label("Búsqueda web");
+                ui.label("Tavily");
+                ui.label(RichText::new(tav_status.label()).color(status_color(tav_status)));
+                ui.end_row();
+
+                ui.label("Búsqueda alternativa");
+                ui.label("Brave");
+                ui.label(RichText::new(brv_status.label()).color(status_color(brv_status)));
+                ui.end_row();
+
+                ui.label("Lectura web");
+                ui.label("Local");
+                ui.label(RichText::new(if ext.web_fetch_enabled {
+                    "Disponible"
+                } else {
+                    "Deshabilitado"
+                }));
+                ui.end_row();
+
+                ui.label("Clima");
+                ui.label("Open-Meteo");
+                ui.label(RichText::new(if ext.weather_enabled {
+                    "Disponible"
+                } else {
+                    "Deshabilitado"
+                }));
+                ui.end_row();
+
+                ui.label("Cotizaciones");
+                ui.label("Frankfurter");
+                ui.label(RichText::new(if ext.exchange_enabled {
+                    "Disponible"
+                } else {
+                    "Deshabilitado"
+                }));
+                ui.end_row();
+            });
+
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(format!(
+                "Tavily: {tav_used} / {tav_budget} créditos estimados · Brave: {brv_used} / {brv_budget} créditos estimados"
+            ))
+            .size(11.5)
+            .color(accent),
+        );
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label("Proveedor de búsqueda preferido:");
+        ui.horizontal(|ui| {
+            ui.radio_value(
+                &mut self.config.external_tools.preferred_search_provider,
+                SearchProviderId::Tavily,
+                "Tavily",
+            );
+            ui.radio_value(
+                &mut self.config.external_tools.preferred_search_provider,
+                SearchProviderId::Brave,
+                "Brave",
+            );
+        });
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("Tavily").strong());
+        ui.checkbox(
+            &mut self.config.external_tools.tavily.enabled,
+            "Habilitar Tavily",
+        );
+        ui.label("API Key (Tavily):");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.config.external_tools.tavily.api_key)
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Presupuesto mensual:");
+            ui.add(
+                egui::DragValue::new(&mut self.config.external_tools.tavily.monthly_budget)
+                    .range(0..=100_000),
+            );
+            if ui.small_button("Probar conexión").clicked() {
+                self.spawn_provider_test(SearchProviderId::Tavily);
+            }
+        });
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("Brave Search (alternativa)").strong());
+        ui.checkbox(
+            &mut self.config.external_tools.brave.enabled,
+            "Habilitar Brave",
+        );
+        ui.label("API Key (Brave):");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.config.external_tools.brave.api_key)
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Presupuesto mensual:");
+            ui.add(
+                egui::DragValue::new(&mut self.config.external_tools.brave.monthly_budget)
+                    .range(0..=100_000),
+            );
+            if ui.small_button("Probar conexión").clicked() {
+                self.spawn_provider_test(SearchProviderId::Brave);
+            }
+        });
+        ui.checkbox(
+            &mut self.config.external_tools.brave.allow_paid_fallback,
+            "Permitir usar Brave como respaldo automático (solo si no genera cargos)",
+        );
+
+        if let Some(status) = &self.provider_test_status {
+            ui.add_space(4.0);
+            ui.label(RichText::new(status).size(11.5).color(accent));
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.checkbox(
+            &mut self.config.external_tools.web_fetch_enabled,
+            "Habilitar lectura web (web_fetch)",
+        );
+        ui.checkbox(
+            &mut self.config.external_tools.weather_enabled,
+            "Habilitar clima (Open-Meteo)",
+        );
+        ui.checkbox(
+            &mut self.config.external_tools.exchange_enabled,
+            "Habilitar cotizaciones (Frankfurter)",
+        );
+    }
+
+    fn spawn_provider_test(&mut self, pid: SearchProviderId) {
+        self.provider_test_status = Some(format!("Probando {}...", pid.label()));
+        let free_tools = Arc::clone(&self.free_tools);
+        let cfg = self.config.external_tools.clone();
+        let tx = self.bg_tx.clone();
+        self.rt.spawn(async move {
+            let msg = match free_tools.test_search_provider(&cfg, pid).await {
+                Ok(ok) => format!("✓ {ok}"),
+                Err(err) => format!("⚠️ {err}"),
+            };
+            let _ = tx.send(BgEvent::ProviderTestResult(msg));
+        });
     }
 
     fn render_settings_ai_section(&mut self, ui: &mut egui::Ui) {
@@ -4632,5 +4996,58 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     } else {
         let prefix: String = s.chars().take(max_chars - 1).collect();
         format!("{prefix}…")
+    }
+}
+
+fn is_external_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "web_search" | "web_fetch" | "get_weather" | "get_exchange_rate"
+    )
+}
+
+async fn execute_external_tool_async(
+    engine: &FreeToolsEngine,
+    cfg: &crate::config::ExternalToolsConfig,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    match name {
+        "web_search" => {
+            let query = args["query"].as_str().unwrap_or("");
+            let max_results = args["max_results"].as_u64().unwrap_or(5) as usize;
+            let resp = engine
+                .execute_web_search(cfg, query, max_results)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(format_search_response_for_user_and_llm(&resp))
+        }
+        "web_fetch" => {
+            let url = args["url"].as_str().unwrap_or("");
+            engine
+                .execute_web_fetch(cfg, url)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "get_weather" => {
+            let city = args["city"]
+                .as_str()
+                .or_else(|| args["location"].as_str())
+                .unwrap_or("Buenos Aires");
+            engine
+                .execute_weather(cfg, city)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "get_exchange_rate" => {
+            let base = args["base"].as_str().unwrap_or("USD");
+            let target = args["target"].as_str().unwrap_or("EUR");
+            let amount = args["amount"].as_f64().unwrap_or(1.0);
+            engine
+                .execute_exchange_rate(cfg, base, target, amount)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        _ => Err(format!("Herramienta externa desconocida: {name}")),
     }
 }

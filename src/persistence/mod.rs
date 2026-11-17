@@ -215,7 +215,6 @@ impl Database {
         Ok((db, outcome))
     }
 
-    #[cfg(test)]
     pub fn open_in_memory() -> anyhow::Result<Self> {
         let mut conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -504,6 +503,82 @@ impl Database {
             params![now],
         )?;
         Ok(count)
+    }
+
+    /// Atomically reserves `estimated_credits` for `(provider_id, period_key)` if within `budget`.
+    /// Returns `Ok(true)` if reserved, `Ok(false)` if quota would be exceeded.
+    pub fn reserve_external_usage(
+        &mut self,
+        id: &str,
+        tool_name: &str,
+        provider_id: &str,
+        period_key: &str,
+        estimated_credits: u32,
+        budget: u32,
+    ) -> anyhow::Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let used: u32 = tx.query_row(
+            "SELECT COALESCE(SUM(COALESCE(confirmed_credits, estimated_credits)), 0)
+             FROM external_tool_usage
+             WHERE provider_id = ?1 AND period_key = ?2 AND status IN ('Reserved', 'Success')",
+            params![provider_id, period_key],
+            |row| row.get(0),
+        )?;
+        if used.saturating_add(estimated_credits) > budget {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO external_tool_usage (id, tool_name, provider_id, period_key, estimated_credits, confirmed_credits, status, error_kind, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'Reserved', NULL, ?6)",
+            params![
+                id,
+                tool_name,
+                provider_id,
+                period_key,
+                estimated_credits,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Finalizes a previously reserved external tool usage record (`Success` or `Failed`).
+    pub fn finalize_external_usage(
+        &self,
+        id: &str,
+        status: &str,
+        confirmed_credits: Option<u32>,
+        error_kind: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE external_tool_usage
+             SET status = ?2, confirmed_credits = COALESCE(?3, confirmed_credits), error_kind = ?4
+             WHERE id = ?1",
+            params![id, status, confirmed_credits, error_kind],
+        )?;
+        Ok(())
+    }
+
+    /// Returns `(estimated_or_confirmed_used, has_confirmed)` for `(provider_id, period_key)`.
+    pub fn sum_external_usage_for_period(
+        &self,
+        provider_id: &str,
+        period_key: &str,
+    ) -> anyhow::Result<(u32, bool)> {
+        self.conn
+            .query_row(
+                "SELECT
+                    COALESCE(SUM(COALESCE(confirmed_credits, estimated_credits)), 0),
+                    COALESCE(MAX(CASE WHEN confirmed_credits IS NOT NULL THEN 1 ELSE 0 END), 0)
+                 FROM external_tool_usage
+                 WHERE provider_id = ?1 AND period_key = ?2 AND status IN ('Reserved', 'Success')",
+                params![provider_id, period_key],
+                |row| Ok((row.get::<_, u32>(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .map_err(Into::into)
     }
 
     pub fn count_conversations(&self) -> anyhow::Result<usize> {

@@ -187,6 +187,26 @@ const MIGRATIONS: &[Migration] = &[
             ON focus_sessions(ended_at DESC);
     "#,
     },
+    Migration {
+        version: 4,
+        name: "0004_external_tool_usage",
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS external_tool_usage (
+            id TEXT PRIMARY KEY,
+            tool_name TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            period_key TEXT NOT NULL,
+            estimated_credits INTEGER NOT NULL,
+            confirmed_credits INTEGER,
+            status TEXT NOT NULL,
+            error_kind TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_external_usage_provider_period
+            ON external_tool_usage(provider_id, period_key);
+    "#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> anyhow::Result<()> {

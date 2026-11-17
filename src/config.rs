@@ -191,6 +191,121 @@ pub fn clamp_window_position(
     [pos[0].clamp(min_x, max_x), pos[1].clamp(min_y, max_y)]
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SearchProviderId {
+    #[default]
+    Tavily,
+    Brave,
+    Searxng,
+}
+
+impl SearchProviderId {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tavily => "tavily",
+            Self::Brave => "brave",
+            Self::Searxng => "searxng",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tavily => "Tavily",
+            Self::Brave => "Brave",
+            Self::Searxng => "SearXNG",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchProviderConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_search_budget")]
+    pub monthly_budget: u32,
+    /// Optional day of month (1..=28) when quota resets. If `None` and exhausted, stays blocked until verified.
+    #[serde(default)]
+    pub reset_day: Option<u8>,
+    /// Brave safety guard: never fall back to a provider that could incur charges unless explicitly allowed.
+    #[serde(default)]
+    pub allow_paid_fallback: bool,
+}
+
+impl Default for SearchProviderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            api_key: String::new(),
+            monthly_budget: default_search_budget(),
+            reset_day: Some(1),
+            allow_paid_fallback: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SearxngConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalToolsConfig {
+    #[serde(default)]
+    pub preferred_search_provider: SearchProviderId,
+    #[serde(default)]
+    pub tavily: SearchProviderConfig,
+    #[serde(default = "default_brave_config")]
+    pub brave: SearchProviderConfig,
+    #[serde(default)]
+    pub searxng: SearxngConfig,
+    #[serde(default = "default_true")]
+    pub web_fetch_enabled: bool,
+    #[serde(default = "default_fetch_max_chars")]
+    pub web_fetch_max_chars: usize,
+    #[serde(default = "default_true")]
+    pub weather_enabled: bool,
+    #[serde(default = "default_true")]
+    pub exchange_enabled: bool,
+}
+
+fn default_search_budget() -> u32 {
+    1000
+}
+
+fn default_fetch_max_chars() -> usize {
+    6000
+}
+
+fn default_brave_config() -> SearchProviderConfig {
+    SearchProviderConfig {
+        enabled: false,
+        api_key: String::new(),
+        monthly_budget: 1000,
+        reset_day: None,
+        allow_paid_fallback: false,
+    }
+}
+
+impl Default for ExternalToolsConfig {
+    fn default() -> Self {
+        Self {
+            preferred_search_provider: SearchProviderId::Tavily,
+            tavily: SearchProviderConfig::default(),
+            brave: default_brave_config(),
+            searxng: SearxngConfig::default(),
+            web_fetch_enabled: true,
+            web_fetch_max_chars: default_fetch_max_chars(),
+            weather_enabled: true,
+            exchange_enabled: true,
+        }
+    }
+}
+
 /// Configuration for the AI provider and assistant preferences.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -233,6 +348,8 @@ pub struct AppConfig {
     pub audio_volume: u8,
     #[serde(default)]
     pub audio_muted: bool,
+    #[serde(default)]
+    pub external_tools: ExternalToolsConfig,
 }
 
 fn default_true() -> bool {
@@ -284,6 +401,7 @@ impl Default for AppConfig {
             island_keep_visible_during_ai: true,
             audio_volume: default_audio_volume(),
             audio_muted: false,
+            external_tools: ExternalToolsConfig::default(),
         }
     }
 }
@@ -313,7 +431,12 @@ impl AppConfig {
             fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json)?;
+        fs::write(&path, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
         Ok(())
     }
 

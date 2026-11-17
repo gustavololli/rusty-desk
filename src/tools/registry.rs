@@ -187,6 +187,54 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
             operation: OperationKind::Read,
             category: "weather",
         },
+        ToolSpec {
+            id: "web_search",
+            name: "web_search",
+            description: "Buscar información actualizada en Internet y devolver resultados con título, URL, resumen y fuente.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Consulta de búsqueda" },
+                    "max_results": { "type": "integer", "description": "Cantidad máxima de resultados (1..=10, por defecto 5)" }
+                },
+                "required": ["query"]
+            }),
+            risk: RiskLevel::Read,
+            operation: OperationKind::Read,
+            category: "web_search",
+        },
+        ToolSpec {
+            id: "web_fetch",
+            name: "web_fetch",
+            description: "Lee y extrae el texto principal de una URL pública HTTP/HTTPS para resumirla o consultarla.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL HTTP o HTTPS pública a leer" }
+                },
+                "required": ["url"]
+            }),
+            risk: RiskLevel::Read,
+            operation: OperationKind::Read,
+            category: "web_fetch",
+        },
+        ToolSpec {
+            id: "get_exchange_rate",
+            name: "get_exchange_rate",
+            description: "Consulta tipos de cambio oficiales de referencia (Frankfurter/BCE, no dólar blue/MEP).",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "base": { "type": "string", "description": "Código ISO de moneda origen (ej: USD)" },
+                    "target": { "type": "string", "description": "Código ISO de moneda destino (ej: EUR)" },
+                    "amount": { "type": "number", "description": "Importe a convertir (por defecto 1)" }
+                },
+                "required": ["base", "target"]
+            }),
+            risk: RiskLevel::Read,
+            operation: OperationKind::Read,
+            category: "exchange",
+        },
     ]
 }
 
@@ -297,6 +345,48 @@ pub fn select_tools_for_message(user_text: &str) -> Vec<ToolDef> {
     .any(|k| lower.contains(k))
     {
         categories.push("weather");
+    }
+    if [
+        "http://",
+        "https://",
+        "resum",
+        "articulo",
+        "artículo",
+        "pagina",
+        "página",
+        "link",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        categories.push("web_fetch");
+    }
+    if [
+        "dolar", "dólar", "euro", "cotiza", "cambio", "usd", "eur", "brl", "moneda", "divisa",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        categories.push("exchange");
+    }
+    if [
+        "busca",
+        "buscar",
+        "internet",
+        "noticias",
+        "novedades",
+        "ultima",
+        "última",
+        "actual",
+        "semana",
+        "reciente",
+        "version",
+        "versión",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        categories.push("web_search");
     }
 
     let specs = all_tool_specs();
