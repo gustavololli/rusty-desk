@@ -157,7 +157,11 @@ mod tests {
         assert_eq!(focus_frame.eye, EyeExpression::Squint);
 
         // Listening uses SoundPulse equalizer bars.
-        ctrl.on_event(PetEvent::VoiceListeningStart, &cfg, AssistantMood::Listening);
+        ctrl.on_event(
+            PetEvent::VoiceListeningStart,
+            &cfg,
+            AssistantMood::Listening,
+        );
         let listen_frame = ctrl.tick(0.05, AssistantMood::Listening, &cfg);
         assert_eq!(listen_frame.particle, ParticleKind::SoundPulse);
 

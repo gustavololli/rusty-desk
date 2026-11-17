@@ -405,12 +405,12 @@ impl AnimationController {
                 };
             }
             AnimationState::Happy => {
-                frame.eye = if !reduced && self.state_duration.is_some() && self.state_elapsed < 0.45
-                {
-                    EyeExpression::Wink
-                } else {
-                    EyeExpression::Happy
-                };
+                frame.eye =
+                    if !reduced && self.state_duration.is_some() && self.state_elapsed < 0.45 {
+                        EyeExpression::Wink
+                    } else {
+                        EyeExpression::Happy
+                    };
                 frame.mouth = MouthExpression::Smile;
                 frame.blush = true;
                 if !reduced && expressive {

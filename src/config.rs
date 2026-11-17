@@ -1,3 +1,4 @@
+use crate::ui::pet::WindowMode;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -207,6 +208,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub pet: PetConfig,
     #[serde(default)]
+    pub window_mode: WindowMode,
+    #[serde(default = "default_true")]
+    pub always_on_top: bool,
+    #[serde(default = "default_true")]
+    pub island_remember_position: bool,
+    #[serde(default)]
     pub island_position: IslandPosition,
     #[serde(default)]
     pub island_custom_position: Option<[f32; 2]>,
@@ -237,7 +244,7 @@ fn default_island_margin() -> f32 {
 }
 
 fn default_island_hide_delay() -> u32 {
-    5
+    2
 }
 
 fn default_audio_volume() -> u8 {
@@ -264,6 +271,9 @@ impl Default for AppConfig {
             sfx_enabled: true,
             organize_target_dir: default_desktop,
             pet: PetConfig::default(),
+            window_mode: WindowMode::Expanded,
+            always_on_top: true,
+            island_remember_position: true,
             island_position: IslandPosition::default(),
             island_custom_position: None,
             island_margin: default_island_margin(),
@@ -342,7 +352,7 @@ mod tests {
         assert_eq!(cfg.pet.sleep_after_mins, 5);
         assert_eq!(cfg.pet.pet_pos, None);
         assert_eq!(cfg.island_position, IslandPosition::Top);
-        assert_eq!(cfg.island_hide_delay, 5);
+        assert_eq!(cfg.island_hide_delay, 2);
         assert!(cfg.island_show_on_hover);
         assert!(cfg.island_keep_visible_during_playback);
         assert_eq!(cfg.audio_volume, 80);
@@ -402,5 +412,32 @@ mod tests {
         let nan_clamped =
             clamp_pet_position([f32::NAN, 100.0], 80.0, Some((0.0, 0.0, 1920.0, 1080.0)));
         assert_eq!(nan_clamped, [60.0, 60.0]);
+    }
+
+    #[test]
+    fn island_v021_defaults_and_roundtrip_persistence() {
+        let def = AppConfig::default();
+        assert!(!def.island_auto_hide);
+        assert_eq!(def.island_hide_delay, 2);
+        assert!(def.island_remember_position);
+        assert!(def.always_on_top);
+        assert_eq!(def.window_mode, WindowMode::Expanded);
+
+        let mut custom = def.clone();
+        custom.window_mode = WindowMode::Island;
+        custom.always_on_top = false;
+        custom.island_remember_position = false;
+        custom.island_auto_hide = true;
+        custom.island_position = IslandPosition::Left;
+        custom.island_custom_position = Some([12.0, 240.0]);
+
+        let json = serde_json::to_string(&custom).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.window_mode, WindowMode::Island);
+        assert!(!parsed.always_on_top);
+        assert!(!parsed.island_remember_position);
+        assert!(parsed.island_auto_hide);
+        assert_eq!(parsed.island_position, IslandPosition::Left);
+        assert_eq!(parsed.island_custom_position, Some([12.0, 240.0]));
     }
 }

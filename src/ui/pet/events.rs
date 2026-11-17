@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 /// Display mode of the rusty-desk window.
 /// All three modes share the exact same logical application state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum WindowMode {
     #[default]
     Expanded,

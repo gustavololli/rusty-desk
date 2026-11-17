@@ -182,7 +182,14 @@ impl RustyDeskApp {
         );
 
         sfx::play(SfxEvent::Startup, config.sfx_enabled);
-        apply_platform_always_on_top(true);
+        let always_on_top = config.always_on_top;
+        apply_platform_always_on_top(always_on_top);
+        if !always_on_top {
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                    egui::WindowLevel::Normal,
+                ));
+        }
 
         let initial_playlist_id = data.playlists.first().map(|p| p.id.clone());
         let initial_tracks = initial_playlist_id
@@ -198,13 +205,28 @@ impl RustyDeskApp {
         let current_monitor = detect_current_monitor(&cc.egui_ctx, screen_bounds);
         let session_kind = detect_session_kind();
 
-        Self {
+        let mut config = config;
+        if !config.island_remember_position {
+            config.island_custom_position = None;
+        } else if let Some(pos) = config.island_custom_position {
+            let clamped =
+                clamp_window_position(pos, [360.0, 66.0], Some(current_monitor.as_tuple()));
+            config.island_custom_position = Some(clamped);
+        }
+
+        let initial_mode = if config.window_mode == WindowMode::Pet && !config.pet.enabled {
+            WindowMode::Island
+        } else {
+            config.window_mode
+        };
+
+        let mut app = Self {
             rt: tokio::runtime::Runtime::new().expect("No se pudo iniciar Tokio"),
             config,
             data,
             organizer: FileOrganizer::default(),
-            window_mode: WindowMode::Expanded,
-            always_on_top: true,
+            window_mode: initial_mode,
+            always_on_top,
             active_tab: ActiveTab::Chat,
             mood: AssistantMood::Idle,
             pet_controller: AnimationController::default(),
@@ -255,7 +277,11 @@ impl RustyDeskApp {
             bg_tx,
             bg_rx,
             global_cursor,
+        };
+        if initial_mode != WindowMode::Expanded {
+            app.set_window_mode(&cc.egui_ctx, initial_mode);
         }
+        app
     }
 
     fn mood_accent(&self) -> Color32 {
@@ -1090,10 +1116,11 @@ impl RustyDeskApp {
             self.pet_dragging = false;
         }
         if self.window_mode == WindowMode::Island && target != WindowMode::Island {
-            if self.config.island_position == IslandPosition::Custom {
+            if self.config.island_position == IslandPosition::Custom
+                && self.config.island_remember_position
+            {
                 if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
                     self.config.island_custom_position = Some([outer.min.x, outer.min.y]);
-                    let _ = self.config.save();
                 }
             }
             self.island_dragging = false;
@@ -1106,6 +1133,10 @@ impl RustyDeskApp {
         };
 
         self.window_mode = target;
+        if self.config.window_mode != target {
+            self.config.window_mode = target;
+            let _ = self.config.save();
+        }
         let music_active = self.music_player.is_active();
         let (min_size, size) = match target {
             WindowMode::Expanded => (Vec2::new(320.0, 360.0), Vec2::new(450.0, 650.0)),
@@ -1186,27 +1217,49 @@ impl RustyDeskApp {
         self.emit_pet_event(PetEvent::ModeChanged(target));
     }
 
-    fn handle_drag(&mut self, ui: &egui::Ui, ctx: &egui::Context, rect: egui::Rect) {
-        let resp = ui.interact(rect, ui.id().with("island_drag"), egui::Sense::drag());
+    fn handle_drag(
+        &mut self,
+        ui: &egui::Ui,
+        ctx: &egui::Context,
+        rect: egui::Rect,
+    ) -> egui::Response {
+        let resp = ui.interact(
+            rect,
+            ui.id().with("island_drag"),
+            egui::Sense::click_and_drag(),
+        );
         if resp.drag_started() {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
         self.island_dragging = resp.dragged();
         if resp.drag_stopped() && self.window_mode == WindowMode::Island {
             if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-                if self.config.island_position == IslandPosition::Custom {
-                    self.config.island_custom_position = Some([outer.min.x, outer.min.y]);
+                let (snapped_edge, snapped_pos) = crate::ui::island::snap_island_to_edge(
+                    [outer.min.x, outer.min.y],
+                    [outer.width(), outer.height()],
+                    self.current_monitor,
+                    self.config.island_margin,
+                );
+                if snapped_edge == IslandPosition::Custom {
+                    self.config.island_position = IslandPosition::Custom;
+                    self.config.island_custom_position = Some(snapped_pos);
                 } else {
-                    self.config.island_position = crate::ui::island::infer_nearest_edge(
-                        [outer.min.x, outer.min.y],
-                        [outer.width(), outer.height()],
-                        self.current_monitor,
-                    );
+                    self.config.island_position = IslandPosition::Custom;
+                    self.config.island_custom_position = Some(snapped_pos);
+                    if self.session_kind != SessionKind::Wayland {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(
+                            snapped_pos[0],
+                            snapped_pos[1],
+                        )));
+                    }
                 }
-                let _ = self.config.save();
+                if self.config.island_remember_position {
+                    let _ = self.config.save();
+                }
                 self.island_sm.invalidate_geometry();
             }
         }
+        resp
     }
 }
 
@@ -1342,7 +1395,10 @@ impl eframe::App for RustyDeskApp {
 
                     island_frame.show(ui, |ui| {
                         ui.set_min_size(ui.available_size());
-                        self.render_compact_island(ui, ctx, time, pointer_pos, accent);
+                        let controls_enabled = out.visibility != IslandVisibility::Hiding;
+                        ui.add_enabled_ui(controls_enabled, |ui| {
+                            self.render_compact_island(ui, ctx, time, pointer_pos, accent);
+                        });
                     });
                 });
             return;
@@ -1416,7 +1472,7 @@ impl eframe::App for RustyDeskApp {
                                 );
                             });
                         });
-                        self.handle_drag(ui, ctx, drag_area.response.rect);
+                        let _ = self.handle_drag(ui, ctx, drag_area.response.rect);
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if pixel_button(
@@ -1732,24 +1788,56 @@ impl RustyDeskApp {
     fn render_island_hidden_tab(&mut self, ui: &mut egui::Ui, accent: Color32) {
         let avail = ui.available_rect_before_wrap();
         let painter = ui.painter();
-        let bg = Color32::from_rgba_unmultiplied(11, 15, 25, 240);
-        painter.rect_filled(avail, 3.0, bg);
-        painter.rect_stroke(avail, 3.0, Stroke::new(1.5_f32, accent));
+        let bg = Color32::from_rgba_unmultiplied(15, 23, 42, 245);
+        painter.rect_filled(avail, 6.0, bg);
+        painter.rect_stroke(avail, 6.0, Stroke::new(1.5_f32, accent));
 
-        // Pixel-art 3-dot grip indicator centered along the tab's long axis.
+        // Recognizable mini-Rusty identity inside the 24px tab: glowing eyes + grip dots.
         let horizontal = avail.width() >= avail.height();
         let center = avail.center();
-        for offset in [-8.0_f32, 0.0, 8.0] {
-            let dot_center = if horizontal {
-                Pos2::new(center.x + offset, center.y)
-            } else {
-                Pos2::new(center.x, center.y + offset)
-            };
-            painter.rect_filled(
-                egui::Rect::from_center_size(dot_center, Vec2::splat(3.0)),
-                0.0,
-                accent,
-            );
+        if horizontal {
+            // Two elongated mini eyes in the center + subtle side grip dots
+            for dx in [-4.5_f32, 2.5_f32] {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        Pos2::new(center.x + dx, center.y - 3.0),
+                        Vec2::new(2.5, 6.0),
+                    ),
+                    0.5,
+                    accent,
+                );
+            }
+            for dx in [-14.0_f32, 14.0_f32] {
+                painter.rect_filled(
+                    egui::Rect::from_center_size(
+                        Pos2::new(center.x + dx, center.y),
+                        Vec2::splat(2.5),
+                    ),
+                    0.0,
+                    Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 150),
+                );
+            }
+        } else {
+            for dy in [-4.5_f32, 2.5_f32] {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        Pos2::new(center.x - 3.0, center.y + dy),
+                        Vec2::new(6.0, 2.5),
+                    ),
+                    0.5,
+                    accent,
+                );
+            }
+            for dy in [-14.0_f32, 14.0_f32] {
+                painter.rect_filled(
+                    egui::Rect::from_center_size(
+                        Pos2::new(center.x, center.y + dy),
+                        Vec2::splat(2.5),
+                    ),
+                    0.0,
+                    Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 150),
+                );
+            }
         }
     }
 
@@ -1785,7 +1873,10 @@ impl RustyDeskApp {
                         ui.label(RichText::new(sub).size(11.0).color(accent));
                     });
                 });
-                self.handle_drag(ui, ctx, drag_area.response.rect);
+                let drag_resp = self.handle_drag(ui, ctx, drag_area.response.rect);
+                if drag_resp.double_clicked() && !drag_resp.dragged() {
+                    self.set_window_mode(ctx, WindowMode::Expanded);
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if pixel_button(
@@ -3869,6 +3960,16 @@ impl RustyDeskApp {
         ui.add_space(6.0);
         ui.separator();
         ui.checkbox(&mut self.config.island_auto_hide, "Ocultar automáticamente");
+        ui.checkbox(
+            &mut self.config.island_remember_position,
+            "Recordar posición",
+        );
+        if ui
+            .checkbox(&mut self.config.always_on_top, "Mantener siempre visible")
+            .changed()
+        {
+            self.always_on_top = self.config.always_on_top;
+        }
 
         ui.add_enabled_ui(self.config.island_auto_hide, |ui| {
             ui.label(

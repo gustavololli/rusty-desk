@@ -272,7 +272,10 @@ pub fn parse_client_ids_for_pid(clients_text: &str, pid: u32) -> Vec<String> {
 }
 
 /// Parses `pactl list sink-inputs` output and returns all sink-input IDs owned by `client_ids`.
-pub fn parse_sink_input_ids_for_clients(sink_inputs_text: &str, client_ids: &[String]) -> Vec<String> {
+pub fn parse_sink_input_ids_for_clients(
+    sink_inputs_text: &str,
+    client_ids: &[String],
+) -> Vec<String> {
     parse_block_ids_matching(sink_inputs_text, "Sink Input #", "Client:", |v| {
         client_ids.iter().any(|c| c == v)
     })
