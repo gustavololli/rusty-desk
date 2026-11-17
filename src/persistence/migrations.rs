@@ -160,6 +160,33 @@ const MIGRATIONS: &[Migration] = &[
             ON music_tracks(playlist_id, position ASC);
     "#,
     },
+    Migration {
+        version: 3,
+        name: "0003_focus_sessions",
+        sql: r#"
+        ALTER TABLE pomodoro_state ADD COLUMN active_task_id TEXT;
+        ALTER TABLE pomodoro_state ADD COLUMN active_task_title TEXT;
+        ALTER TABLE pomodoro_state ADD COLUMN running INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE pomodoro_state ADD COLUMN phase_ref_utc TEXT;
+        ALTER TABLE pomodoro_state ADD COLUMN phase_ref_remaining_secs INTEGER NOT NULL DEFAULT 1500;
+        ALTER TABLE pomodoro_state ADD COLUMN active_session_id TEXT;
+        ALTER TABLE pomodoro_state ADD COLUMN session_started_at TEXT;
+        ALTER TABLE pomodoro_state ADD COLUMN pending_prompt TEXT;
+
+        CREATE TABLE IF NOT EXISTS focus_sessions (
+            id TEXT PRIMARY KEY,
+            task_id TEXT,
+            task_title TEXT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT NOT NULL,
+            duration_secs INTEGER NOT NULL,
+            status TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_focus_sessions_ended_at
+            ON focus_sessions(ended_at DESC);
+    "#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> anyhow::Result<()> {

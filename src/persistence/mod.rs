@@ -35,6 +35,25 @@ pub struct PersistedPomodoro {
     pub break_minutes: u32,
     pub remaining_secs: u32,
     pub completed_sessions: u32,
+    pub active_task_id: Option<String>,
+    pub active_task_title: Option<String>,
+    pub running: bool,
+    pub phase_ref_utc: Option<String>,
+    pub phase_ref_remaining_secs: u32,
+    pub active_session_id: Option<String>,
+    pub session_started_at: Option<String>,
+    pub pending_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusSessionRecord {
+    pub id: String,
+    pub task_id: Option<String>,
+    pub task_title: Option<String>,
+    pub started_at: String,
+    pub ended_at: String,
+    pub duration_secs: u32,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,7 +364,9 @@ impl Database {
     pub fn load_pomodoro(&self) -> anyhow::Result<Option<PersistedPomodoro>> {
         self.conn
             .query_row(
-                "SELECT phase, work_minutes, break_minutes, remaining_secs, completed_sessions
+                "SELECT phase, work_minutes, break_minutes, remaining_secs, completed_sessions,
+                        active_task_id, active_task_title, running, phase_ref_utc,
+                        phase_ref_remaining_secs, active_session_id, session_started_at, pending_prompt
                  FROM pomodoro_state WHERE id = 1",
                 [],
                 |row| {
@@ -355,6 +376,14 @@ impl Database {
                         break_minutes: row.get(2)?,
                         remaining_secs: row.get(3)?,
                         completed_sessions: row.get(4)?,
+                        active_task_id: row.get(5)?,
+                        active_task_title: row.get(6)?,
+                        running: row.get::<_, i64>(7)? != 0,
+                        phase_ref_utc: row.get(8)?,
+                        phase_ref_remaining_secs: row.get(9)?,
+                        active_session_id: row.get(10)?,
+                        session_started_at: row.get(11)?,
+                        pending_prompt: row.get(12)?,
                     })
                 },
             )
@@ -362,37 +391,119 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn save_pomodoro(
-        &self,
-        phase: &str,
-        work_minutes: u32,
-        break_minutes: u32,
-        remaining_secs: u32,
-        completed_sessions: u32,
-    ) -> anyhow::Result<()> {
+    pub fn save_pomodoro(&self, p: &PersistedPomodoro) -> anyhow::Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT INTO pomodoro_state (id, phase, work_minutes, break_minutes, remaining_secs, completed_sessions, updated_at, version, dirty)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, 1, 1)
+            "INSERT INTO pomodoro_state (
+                id, phase, work_minutes, break_minutes, remaining_secs, completed_sessions,
+                active_task_id, active_task_title, running, phase_ref_utc,
+                phase_ref_remaining_secs, active_session_id, session_started_at, pending_prompt,
+                updated_at, version, dirty
+             )
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 1, 1)
              ON CONFLICT(id) DO UPDATE SET
                 phase = excluded.phase,
                 work_minutes = excluded.work_minutes,
                 break_minutes = excluded.break_minutes,
                 remaining_secs = excluded.remaining_secs,
                 completed_sessions = excluded.completed_sessions,
+                active_task_id = excluded.active_task_id,
+                active_task_title = excluded.active_task_title,
+                running = excluded.running,
+                phase_ref_utc = excluded.phase_ref_utc,
+                phase_ref_remaining_secs = excluded.phase_ref_remaining_secs,
+                active_session_id = excluded.active_session_id,
+                session_started_at = excluded.session_started_at,
+                pending_prompt = excluded.pending_prompt,
                 updated_at = excluded.updated_at,
                 version = pomodoro_state.version + 1,
                 dirty = 1",
             params![
-                phase,
-                work_minutes,
-                break_minutes,
-                remaining_secs,
-                completed_sessions,
+                p.phase,
+                p.work_minutes,
+                p.break_minutes,
+                p.remaining_secs,
+                p.completed_sessions,
+                p.active_task_id,
+                p.active_task_title,
+                if p.running { 1 } else { 0 },
+                p.phase_ref_utc,
+                p.phase_ref_remaining_secs,
+                p.active_session_id,
+                p.session_started_at,
+                p.pending_prompt,
                 now
             ],
         )?;
         Ok(())
+    }
+
+    /// Records a completed or interrupted focus session idempotently (`INSERT OR IGNORE`).
+    pub fn record_focus_session(&self, s: &FocusSessionRecord) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO focus_sessions (id, task_id, task_title, started_at, ended_at, duration_secs, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                s.id,
+                s.task_id,
+                s.task_title,
+                s.started_at,
+                s.ended_at,
+                s.duration_secs,
+                s.status,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Lists all recorded focus sessions ordered newest first.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn list_focus_sessions(&self) -> anyhow::Result<Vec<FocusSessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, task_title, started_at, ended_at, duration_secs, status
+             FROM focus_sessions
+             ORDER BY ended_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(FocusSessionRecord {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                task_title: row.get(2)?,
+                started_at: row.get(3)?,
+                ended_at: row.get(4)?,
+                duration_secs: row.get(5)?,
+                status: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Returns `(completed_count, total_focus_secs)` for sessions ended within `[start_utc, end_utc)`.
+    pub fn focus_summary_in_range(
+        &self,
+        start_utc: &str,
+        end_utc: &str,
+    ) -> anyhow::Result<(u32, u64)> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(duration_secs), 0)
+                 FROM focus_sessions
+                 WHERE status = 'Completed' AND ended_at >= ?1 AND ended_at < ?2",
+                params![start_utc, end_utc],
+                |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u64>(1)?)),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Soft-deletes all completed tasks without touching historical `focus_sessions`.
+    pub fn delete_completed_tasks(&self) -> anyhow::Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let count = self.conn.execute(
+            "UPDATE tasks SET deleted_at = ?1, updated_at = ?1, version = version + 1, dirty = 1
+             WHERE deleted_at IS NULL AND done = 1",
+            params![now],
+        )?;
+        Ok(count)
     }
 
     pub fn count_conversations(&self) -> anyhow::Result<usize> {

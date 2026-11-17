@@ -19,8 +19,8 @@ use crate::platform::{
 };
 use crate::sfx::{self, SfxEvent};
 use crate::state::{
-    format_local_datetime_from_utc, AppData, AssistantMood, HabitItem, PomodoroPhase, TaskItem,
-    UiChatEntry,
+    format_local_datetime_from_utc, AppData, AssistantMood, FocusStartResult, HabitItem,
+    PomodoroPhase, PomodoroPrompt, PomodoroTickOutcome, TaskItem, UiChatEntry,
 };
 use crate::tools::{
     parse_local_command, select_tools_for_message, ExecutionSource, LocalCommand,
@@ -37,7 +37,6 @@ use eframe::egui::{self, Color32, Pos2, RichText, Rounding, Stroke, Vec2};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,13 +115,17 @@ pub struct RustyDeskApp {
     welcome_text: String,
 
     new_task_input: String,
+    editing_task_id: Option<String>,
+    editing_task_title: String,
+    pending_focus_switch_task_id: Option<String>,
+    confirm_clear_completed_tasks: bool,
+    confirm_skip_break_continue: bool,
     new_habit_name: String,
     new_habit_icon: String,
     new_habit_goal: u32,
     status_banner: Option<String>,
 
     active_recording: Option<ActiveRecording>,
-    last_pomodoro_tick: Instant,
 
     md_is_converting: bool,
     md_auto_save: bool,
@@ -220,6 +223,14 @@ impl RustyDeskApp {
             config.window_mode
         };
 
+        let initial_mood = if data.pomodoro.running && data.pomodoro.phase == PomodoroPhase::Work {
+            AssistantMood::Focused
+        } else if data.pomodoro.pending_prompt == Some(PomodoroPrompt::WorkFinished) {
+            AssistantMood::Happy
+        } else {
+            AssistantMood::Idle
+        };
+
         let mut app = Self {
             rt: tokio::runtime::Runtime::new().expect("No se pudo iniciar Tokio"),
             config,
@@ -228,7 +239,7 @@ impl RustyDeskApp {
             window_mode: initial_mode,
             always_on_top,
             active_tab: ActiveTab::Chat,
-            mood: AssistantMood::Idle,
+            mood: initial_mood,
             pet_controller: AnimationController::default(),
             pet_behavior: PetBehavior::new(0.0),
             pet_drag_origin: None,
@@ -246,12 +257,16 @@ impl RustyDeskApp {
             system_prompt,
             welcome_text: welcome,
             new_task_input: String::new(),
+            editing_task_id: None,
+            editing_task_title: String::new(),
+            pending_focus_switch_task_id: None,
+            confirm_clear_completed_tasks: false,
+            confirm_skip_break_continue: false,
             new_habit_name: String::new(),
             new_habit_icon: "✨".to_string(),
             new_habit_goal: 1,
             status_banner: initial_banner,
             active_recording: None,
-            last_pomodoro_tick: Instant::now(),
             md_is_converting: false,
             md_auto_save: true,
             md_compact_mode: CompactionMode::Moderate,
@@ -794,33 +809,28 @@ impl RustyDeskApp {
     fn tick_pomodoro(&mut self, ctx: &egui::Context) {
         if self.data.pomodoro.running {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
-            if self.last_pomodoro_tick.elapsed().as_secs() >= 1 {
-                self.last_pomodoro_tick = Instant::now();
-                if let Some(next_phase) = self.data.pomodoro.tick_one_second() {
-                    let _ = self.data.save();
-                    let msg = match next_phase {
-                        PomodoroPhase::Break => {
-                            self.mood = AssistantMood::Happy;
-                            self.emit_pet_event(PetEvent::PomodoroFinished);
-                            sfx::play(SfxEvent::PomodoroDone, self.config.sfx_enabled);
-                            "¡Sesión Pomodoro completada! Hora de descansar."
+            if let Some(outcome) = self.data.sync_pomodoro_elapsed() {
+                let msg = match outcome {
+                    PomodoroTickOutcome::WorkFinished(_) => {
+                        self.mood = AssistantMood::Happy;
+                        self.emit_pet_event(PetEvent::PomodoroFinished);
+                        sfx::play(SfxEvent::PomodoroDone, self.config.sfx_enabled);
+                        if let Some(title) = self.data.active_task_display_title() {
+                            format!("¡Terminaste tu bloque de concentración en «{title}»!")
+                        } else {
+                            "¡Sesión Pomodoro completada! Hora de descansar.".to_string()
                         }
-                        PomodoroPhase::Idle => {
-                            self.mood = AssistantMood::Idle;
-                            self.emit_pet_event(PetEvent::PomodoroPaused);
-                            sfx::play(SfxEvent::Click, self.config.sfx_enabled);
-                            "Descanso terminado. ¿Arrancamos otro bloque de enfoque?"
-                        }
-                        PomodoroPhase::Work => {
-                            self.emit_pet_event(PetEvent::PomodoroStarted);
-                            sfx::play(SfxEvent::PomodoroStart, self.config.sfx_enabled);
-                            "Enfoque iniciado."
-                        }
-                    };
-                    self.chat_ui.push(UiChatEntry::assistant(msg));
-                    if self.config.tts_enabled {
-                        speak_local_async(msg.to_string());
                     }
+                    PomodoroTickOutcome::BreakFinished => {
+                        self.mood = AssistantMood::Idle;
+                        self.emit_pet_event(PetEvent::PomodoroPaused);
+                        sfx::play(SfxEvent::Click, self.config.sfx_enabled);
+                        "Descanso terminado. ¿Seguimos?".to_string()
+                    }
+                };
+                self.chat_ui.push(UiChatEntry::assistant(&msg));
+                if self.config.tts_enabled {
+                    speak_local_async(msg);
                 }
             }
         }
@@ -1856,14 +1866,47 @@ impl RustyDeskApp {
                     draw_avatar(ui, 44.0, self.mood, time, pointer_pos);
                     ui.add_space(4.0);
                     ui.vertical(|ui| {
+                        let pomo_active = self.data.pomodoro.phase != PomodoroPhase::Idle;
+                        let title_line = if pomo_active {
+                            let icon = match self.data.pomodoro.phase {
+                                PomodoroPhase::Work => "🎯",
+                                PomodoroPhase::Break => "☕",
+                                PomodoroPhase::Idle => "",
+                            };
+                            let pause_tag = if self.data.pomodoro.running {
+                                ""
+                            } else {
+                                " (pausa)"
+                            };
+                            format!(
+                                "{} {} {}{}",
+                                self.config.assistant_name,
+                                icon,
+                                self.data.pomodoro.formatted_time(),
+                                pause_tag
+                            )
+                        } else {
+                            self.config.assistant_name.clone()
+                        };
                         ui.label(
-                            RichText::new(&self.config.assistant_name)
+                            RichText::new(title_line)
                                 .strong()
-                                .size(13.5)
+                                .size(13.0)
                                 .color(Color32::WHITE),
                         );
-                        let sub = if self.data.pomodoro.running {
-                            format!("Pomodoro {}", self.data.pomodoro.formatted_time())
+                        let sub = if pomo_active {
+                            if let Some(t) = self.data.active_task_display_title() {
+                                truncate_chars(&t, 26)
+                            } else if self.data.pomodoro.phase == PomodoroPhase::Break {
+                                "Descanso".to_string()
+                            } else {
+                                "Enfoque activo".to_string()
+                            }
+                        } else if let Some(prompt) = self.data.pomodoro.pending_prompt {
+                            match prompt {
+                                PomodoroPrompt::WorkFinished => "¡Bloque terminado!".to_string(),
+                                PomodoroPrompt::BreakFinished => "Descanso terminado".to_string(),
+                            }
                         } else if self.is_thinking {
                             "Pensando...".to_string()
                         } else {
@@ -1916,22 +1959,50 @@ impl RustyDeskApp {
                     {
                         self.set_window_mode(ctx, WindowMode::Expanded);
                     }
-                    let (mic_lbl, mic_bg) = if self.active_recording.is_some() {
-                        ("Parar", Color32::from_rgb(190, 18, 60))
+                    if self.data.pomodoro.phase != PomodoroPhase::Idle {
+                        let (p_icon, p_tip) = if self.data.pomodoro.running {
+                            (PixelIcon::Pause, "Pausar Pomodoro")
+                        } else {
+                            (PixelIcon::Play, "Reanudar Pomodoro")
+                        };
+                        if pixel_button(
+                            ui,
+                            p_icon,
+                            "",
+                            accent,
+                            Color32::from_rgb(15, 20, 32),
+                            p_tip,
+                        )
+                        .clicked()
+                        {
+                            self.data.toggle_pomodoro_and_persist();
+                            self.mood = if self.data.pomodoro.running
+                                && self.data.pomodoro.phase == PomodoroPhase::Work
+                            {
+                                AssistantMood::Focused
+                            } else {
+                                AssistantMood::Idle
+                            };
+                            sfx::play(SfxEvent::Click, self.config.sfx_enabled);
+                        }
                     } else {
-                        ("Voz", Color32::from_rgb(30, 41, 59))
-                    };
-                    if pixel_button(
-                        ui,
-                        PixelIcon::Mic,
-                        mic_lbl,
-                        mic_bg,
-                        Color32::WHITE,
-                        "Hablar por micrófono",
-                    )
-                    .clicked()
-                    {
-                        self.toggle_voice_recording(ctx);
+                        let (mic_lbl, mic_bg) = if self.active_recording.is_some() {
+                            ("Parar", Color32::from_rgb(190, 18, 60))
+                        } else {
+                            ("Voz", Color32::from_rgb(30, 41, 59))
+                        };
+                        if pixel_button(
+                            ui,
+                            PixelIcon::Mic,
+                            mic_lbl,
+                            mic_bg,
+                            Color32::WHITE,
+                            "Hablar por micrófono",
+                        )
+                        .clicked()
+                        {
+                            self.toggle_voice_recording(ctx);
+                        }
                     }
                 });
             });
@@ -2326,16 +2397,94 @@ impl RustyDeskApp {
         });
         ui.add_space(6.0);
 
+        if let Some(switch_id) = self.pending_focus_switch_task_id.clone() {
+            let current_label = self
+                .data
+                .active_task_display_title()
+                .or_else(|| self.data.pomodoro.active_task_title.clone())
+                .unwrap_or_else(|| "la sesión actual".to_string());
+            egui::Frame::none()
+                .fill(Color32::from_rgb(30, 41, 59))
+                .stroke(Stroke::new(1.5_f32, Color32::from_rgb(250, 204, 21)))
+                .rounding(10.0)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Ya estás concentrado en «{current_label}». ¿Querés cambiar?"
+                        ))
+                        .size(12.0)
+                        .color(Color32::WHITE),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cambiar tarea").clicked() {
+                            self.data.focus_on_task(&switch_id, true);
+                            self.mood = AssistantMood::Focused;
+                            self.emit_pet_event(PetEvent::PomodoroStarted);
+                            sfx::play(SfxEvent::PomodoroStart, self.config.sfx_enabled);
+                            self.pending_focus_switch_task_id = None;
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            self.pending_focus_switch_task_id = None;
+                        }
+                    });
+                });
+            ui.add_space(6.0);
+        }
+
         let mut remove_idx = None;
         let mut toggled_task: Option<TaskItem> = None;
+        let mut focus_task_id: Option<String> = None;
+        let mut rename_commit: Option<(String, String)> = None;
+        let mut cancel_edit = false;
+        let active_task_id = self.data.pomodoro.active_task_id.clone();
+
+        let pending_indices: Vec<usize> = self
+            .data
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.done)
+            .map(|(i, _)| i)
+            .collect();
+        let completed_indices: Vec<usize> = self
+            .data
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.done)
+            .map(|(i, _)| i)
+            .collect();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             if self.data.tasks.is_empty() {
                 ui.label(RichText::new("No hay tareas todavía.").color(Color32::GRAY));
+                return;
             }
-            for (idx, task) in self.data.tasks.iter_mut().enumerate() {
+
+            ui.label(
+                RichText::new(format!("Pendientes ({})", pending_indices.len()))
+                    .strong()
+                    .size(12.5)
+                    .color(Color32::from_gray(220)),
+            );
+            ui.add_space(4.0);
+            if pending_indices.is_empty() {
+                ui.label(RichText::new("No hay tareas pendientes.").color(Color32::GRAY));
+            }
+            for idx in pending_indices {
+                let task = &mut self.data.tasks[idx];
+                let is_focused = active_task_id.as_deref() == Some(task.id.as_str())
+                    && self.data.pomodoro.phase != PomodoroPhase::Idle;
+                let is_editing = self.editing_task_id.as_deref() == Some(task.id.as_str());
+
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(24, 31, 48))
+                    .fill(if is_focused {
+                        Color32::from_rgb(30, 41, 68)
+                    } else {
+                        Color32::from_rgb(24, 31, 48)
+                    })
                     .rounding(10.0)
                     .inner_margin(8.0)
                     .show(ui, |ui| {
@@ -2348,34 +2497,180 @@ impl RustyDeskApp {
                                 }
                                 toggled_task = Some(task.clone());
                             }
-                            let mut text = RichText::new(&task.title);
-                            if task.done {
-                                text = text.strikethrough().color(Color32::GRAY);
+                            if is_editing {
+                                let edit_resp = ui.add(
+                                    egui::TextEdit::singleline(&mut self.editing_task_title)
+                                        .desired_width(180.0),
+                                );
+                                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    rename_commit =
+                                        Some((task.id.clone(), self.editing_task_title.clone()));
+                                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                    cancel_edit = true;
+                                } else if edit_resp.lost_focus()
+                                    && !self.editing_task_title.trim().is_empty()
+                                {
+                                    // Keep editing until Enter/Escape or explicit button.
+                                }
+                                if ui.small_button("Guardar").clicked() {
+                                    rename_commit =
+                                        Some((task.id.clone(), self.editing_task_title.clone()));
+                                }
+                                if ui.small_button("Cancelar").clicked() {
+                                    cancel_edit = true;
+                                }
+                            } else {
+                                let label_txt = if is_focused {
+                                    format!("🎯 {}", task.title)
+                                } else {
+                                    task.title.clone()
+                                };
+                                ui.label(RichText::new(label_txt).color(Color32::WHITE));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if pixel_button(
+                                            ui,
+                                            PixelIcon::Clear,
+                                            "",
+                                            Color32::from_rgb(127, 29, 29),
+                                            Color32::WHITE,
+                                            "Eliminar tarea",
+                                        )
+                                        .clicked()
+                                        {
+                                            remove_idx = Some(idx);
+                                        }
+                                        if ui
+                                            .small_button("Editar")
+                                            .on_hover_text("Renombrar tarea")
+                                            .clicked()
+                                        {
+                                            self.editing_task_id = Some(task.id.clone());
+                                            self.editing_task_title = task.title.clone();
+                                        }
+                                        if pixel_button(
+                                            ui,
+                                            PixelIcon::Play,
+                                            "Enfocarme",
+                                            Color32::from_rgb(30, 64, 175),
+                                            Color32::WHITE,
+                                            "Iniciar Pomodoro con esta tarea",
+                                        )
+                                        .clicked()
+                                        {
+                                            focus_task_id = Some(task.id.clone());
+                                        }
+                                    },
+                                );
                             }
-                            ui.label(text);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if pixel_button(
-                                        ui,
-                                        PixelIcon::Clear,
-                                        "Borrar",
-                                        Color32::from_rgb(127, 29, 29),
-                                        Color32::WHITE,
-                                        "Eliminar tarea",
-                                    )
-                                    .clicked()
-                                    {
-                                        remove_idx = Some(idx);
-                                    }
-                                },
-                            );
                         });
                     });
                 ui.add_space(4.0);
             }
+
+            if !completed_indices.is_empty() {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Completadas ({})", completed_indices.len()))
+                            .strong()
+                            .size(12.5)
+                            .color(Color32::from_gray(160)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.confirm_clear_completed_tasks {
+                            if ui.small_button("Cancelar").clicked() {
+                                self.confirm_clear_completed_tasks = false;
+                            }
+                            if ui
+                                .small_button(
+                                    RichText::new("Confirmar")
+                                        .color(Color32::from_rgb(248, 113, 113)),
+                                )
+                                .clicked()
+                            {
+                                let r = self.data.clear_completed_tasks();
+                                self.report_persistence_result(r.map(|_| ()));
+                                self.confirm_clear_completed_tasks = false;
+                            }
+                        } else if ui.small_button("Limpiar completadas").clicked() {
+                            self.confirm_clear_completed_tasks = true;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+
+                for idx in completed_indices {
+                    let task = &mut self.data.tasks[idx];
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(18, 23, 36))
+                        .rounding(10.0)
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut task.done, "").changed() {
+                                    sfx::play(SfxEvent::Click, self.config.sfx_enabled);
+                                    toggled_task = Some(task.clone());
+                                }
+                                ui.label(
+                                    RichText::new(&task.title)
+                                        .strikethrough()
+                                        .color(Color32::GRAY),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if pixel_button(
+                                            ui,
+                                            PixelIcon::Clear,
+                                            "",
+                                            Color32::from_rgb(90, 25, 25),
+                                            Color32::WHITE,
+                                            "Eliminar tarea",
+                                        )
+                                        .clicked()
+                                        {
+                                            remove_idx = Some(idx);
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                    ui.add_space(4.0);
+                }
+            }
         });
 
+        if cancel_edit {
+            self.editing_task_id = None;
+            self.editing_task_title.clear();
+        }
+        if let Some((tid, new_title)) = rename_commit {
+            match self.data.rename_task(&tid, &new_title) {
+                Ok(true) => {
+                    self.editing_task_id = None;
+                    self.editing_task_title.clear();
+                }
+                Ok(false) => {
+                    self.status_banner =
+                        Some("⚠️ El título de la tarea no puede estar vacío.".to_string());
+                }
+                Err(e) => self.report_persistence_result::<()>(Err(e)),
+            }
+        }
+        if let Some(tid) = focus_task_id {
+            match self.data.focus_on_task(&tid, false) {
+                FocusStartResult::Started => {
+                    self.mood = AssistantMood::Focused;
+                    self.emit_pet_event(PetEvent::PomodoroStarted);
+                    sfx::play(SfxEvent::PomodoroStart, self.config.sfx_enabled);
+                }
+                FocusStartResult::ConfirmSwitch { .. } => {
+                    self.pending_focus_switch_task_id = Some(tid);
+                }
+            }
+        }
         if let Some(t) = toggled_task {
             if t.done {
                 self.emit_pet_event(PetEvent::TaskCompleted);
@@ -2491,8 +2786,106 @@ impl RustyDeskApp {
     }
 
     fn render_focus_tab(&mut self, ui: &mut egui::Ui, accent: Color32) {
+        if let Some(prompt) = self.data.pomodoro.pending_prompt {
+            let task_title = self.data.active_task_display_title();
+            egui::Frame::none()
+                .fill(Color32::from_rgb(24, 38, 60))
+                .stroke(Stroke::new(1.5_f32, accent))
+                .rounding(12.0)
+                .inner_margin(10.0)
+                .show(ui, |ui| match prompt {
+                    PomodoroPrompt::WorkFinished => {
+                        ui.label(
+                            RichText::new("¡Terminaste tu bloque de concentración!")
+                                .strong()
+                                .size(13.5)
+                                .color(Color32::WHITE),
+                        );
+                        let question = match &task_title {
+                            Some(t) => format!("¿Cómo te fue con «{t}»?"),
+                            None => "¿Cómo te fue con este bloque?".to_string(),
+                        };
+                        ui.label(RichText::new(question).size(12.0).color(accent));
+                        ui.add_space(6.0);
+                        if self.confirm_skip_break_continue {
+                            ui.label(
+                                RichText::new("¿Omitir el descanso e iniciar otro bloque ahora?")
+                                    .size(11.5)
+                                    .color(Color32::from_rgb(250, 204, 21)),
+                            );
+                            ui.horizontal(|ui| {
+                                if ui.button("Sí, iniciar otro bloque").clicked() {
+                                    self.confirm_skip_break_continue = false;
+                                    self.data.continue_focused_task();
+                                    self.mood = AssistantMood::Focused;
+                                    self.emit_pet_event(PetEvent::PomodoroStarted);
+                                    sfx::play(SfxEvent::PomodoroStart, self.config.sfx_enabled);
+                                }
+                                if ui.button("Cancelar").clicked() {
+                                    self.confirm_skip_break_continue = false;
+                                }
+                            });
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                if task_title.is_some() && ui.button("✅ Completada").clicked() {
+                                    self.data.complete_focused_task();
+                                    self.mood = AssistantMood::Happy;
+                                    self.emit_pet_event(PetEvent::TaskCompleted);
+                                    sfx::play(SfxEvent::TaskCompleted, self.config.sfx_enabled);
+                                }
+                                if ui.button("🔄 Necesito otro bloque").clicked() {
+                                    if self.data.pomodoro.break_minutes > 0 {
+                                        self.confirm_skip_break_continue = true;
+                                    } else {
+                                        self.data.continue_focused_task();
+                                        self.mood = AssistantMood::Focused;
+                                        self.emit_pet_event(PetEvent::PomodoroStarted);
+                                        sfx::play(SfxEvent::PomodoroStart, self.config.sfx_enabled);
+                                    }
+                                }
+                                if ui.button("☕ Descansar").clicked() {
+                                    self.confirm_skip_break_continue = false;
+                                    self.data.start_break_and_persist();
+                                    self.mood = AssistantMood::Idle;
+                                    sfx::play(SfxEvent::Click, self.config.sfx_enabled);
+                                }
+                            });
+                        }
+                    }
+                    PomodoroPrompt::BreakFinished => {
+                        ui.label(
+                            RichText::new("Descanso terminado. ¿Seguimos?")
+                                .strong()
+                                .size(13.5)
+                                .color(Color32::WHITE),
+                        );
+                        if let Some(t) = &task_title {
+                            ui.label(
+                                RichText::new(format!("Tarea: {t}"))
+                                    .size(12.0)
+                                    .color(accent),
+                            );
+                        }
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("▶ Iniciar otro bloque").clicked() {
+                                self.data.continue_focused_task();
+                                self.mood = AssistantMood::Focused;
+                                self.emit_pet_event(PetEvent::PomodoroStarted);
+                                sfx::play(SfxEvent::PomodoroStart, self.config.sfx_enabled);
+                            }
+                            if ui.button("Terminar").clicked() {
+                                self.data.dismiss_pomodoro_prompt(true);
+                                self.mood = AssistantMood::Idle;
+                            }
+                        });
+                    }
+                });
+            ui.add_space(8.0);
+        }
+
         ui.vertical_centered(|ui| {
-            ui.add_space(10.0);
+            ui.add_space(6.0);
             let phase_lbl = match self.data.pomodoro.phase {
                 PomodoroPhase::Idle => "Listo para enfocar",
                 PomodoroPhase::Work => "Enfoque activo",
@@ -2503,6 +2896,14 @@ impl RustyDeskApp {
                     .size(15.0)
                     .color(Color32::LIGHT_GRAY),
             );
+            if let Some(task_title) = self.data.active_task_display_title() {
+                ui.label(
+                    RichText::new(format!("🎯 {task_title}"))
+                        .strong()
+                        .size(13.0)
+                        .color(accent),
+                );
+            }
             ui.add_space(10.0);
 
             // Circular progress ring
@@ -2523,6 +2924,8 @@ impl RustyDeskApp {
             ui.horizontal(|ui| {
                 let (start_icon, start_lbl) = if self.data.pomodoro.running {
                     (PixelIcon::Pause, "Pausar")
+                } else if self.data.pomodoro.phase != PomodoroPhase::Idle {
+                    (PixelIcon::Play, "Reanudar")
                 } else {
                     (PixelIcon::Play, "Iniciar")
                 };
@@ -2552,7 +2955,9 @@ impl RustyDeskApp {
                     self.emit_pet_event_for_tool("pause_pomodoro", &out.status);
                     if out.status == ToolStatus::Error {
                         self.status_banner = Some(format!("⚠️ {}", out.ui_message));
-                    } else if self.data.pomodoro.running {
+                    } else if self.data.pomodoro.running
+                        && self.data.pomodoro.phase == PomodoroPhase::Work
+                    {
                         self.mood = AssistantMood::Focused;
                         sfx::play(SfxEvent::PomodoroStart, self.config.sfx_enabled);
                     } else {
@@ -2560,7 +2965,22 @@ impl RustyDeskApp {
                         sfx::play(SfxEvent::Click, self.config.sfx_enabled);
                     }
                 }
-                if pixel_button(
+                if self.data.pomodoro.phase == PomodoroPhase::Break {
+                    if pixel_button(
+                        ui,
+                        PixelIcon::Clear,
+                        "Terminar descanso",
+                        Color32::from_rgb(51, 65, 85),
+                        Color32::WHITE,
+                        "Finalizar descanso anticipadamente",
+                    )
+                    .clicked()
+                    {
+                        self.data.reset_pomodoro_and_persist();
+                        self.mood = AssistantMood::Idle;
+                        self.emit_pet_event(PetEvent::PomodoroPaused);
+                    }
+                } else if pixel_button(
                     ui,
                     PixelIcon::Reset,
                     "Reiniciar",
@@ -2570,16 +2990,20 @@ impl RustyDeskApp {
                 )
                 .clicked()
                 {
-                    self.data.pomodoro.reset();
+                    self.data.reset_pomodoro_and_persist();
                     self.mood = AssistantMood::Idle;
-                    let _ = self.data.save();
                 }
             });
             ui.add_space(12.0);
-            ui.label(format!(
-                "Sesiones completadas hoy: {}",
-                self.data.pomodoro.completed_sessions
-            ));
+            let (today_count, today_mins) = self.data.today_focus_summary();
+            ui.label(RichText::new(format!("Hoy: {today_count} sesiones completadas")).strong());
+            if today_mins > 0 {
+                ui.label(
+                    RichText::new(format!("{today_mins} minutos de concentración"))
+                        .size(11.5)
+                        .color(Color32::GRAY),
+                );
+            }
         });
 
         ui.separator();
@@ -4196,5 +4620,17 @@ impl RustyDeskApp {
             }
         }
         ctx.input(|i| i.pointer.latest_pos())
+    }
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        s.to_string()
+    } else if max_chars <= 1 {
+        "…".to_string()
+    } else {
+        let prefix: String = s.chars().take(max_chars - 1).collect();
+        format!("{prefix}…")
     }
 }
