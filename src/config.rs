@@ -114,6 +114,82 @@ pub fn clamp_pet_position(
     [pos[0].clamp(min_x, max_x), pos[1].clamp(min_y, max_y)]
 }
 
+/// Default screen anchor position when switching to Island mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IslandPosition {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+    #[serde(alias = "Current")]
+    Custom,
+}
+
+impl IslandPosition {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Top => "Arriba",
+            Self::Bottom => "Abajo",
+            Self::Left => "Izquierda",
+            Self::Right => "Derecha",
+            Self::Custom => "Personalizada",
+        }
+    }
+}
+
+/// Computes the target `[x, y]` outer window position for Island mode in logical coordinates,
+/// clamped within `bounds` `(x, y, w, h)`.
+/// Returns `None` for `IslandPosition::Custom` when `custom_pos` is `None`.
+pub fn compute_island_position(
+    anchor: IslandPosition,
+    island_size: [f32; 2],
+    bounds: Option<(f32, f32, f32, f32)>,
+    margin: f32,
+    custom_pos: Option<[f32; 2]>,
+) -> Option<[f32; 2]> {
+    let margin = if margin.is_finite() {
+        margin.clamp(0.0, 128.0)
+    } else {
+        12.0
+    };
+    let (bx, by, bw, bh) = match bounds {
+        Some((x, y, w, h)) if w > island_size[0] && h > island_size[1] => (x, y, w, h),
+        _ => (0.0, 0.0, 1920.0, 1080.0),
+    };
+    let [w, h] = island_size;
+    let raw = match anchor {
+        IslandPosition::Custom => custom_pos?,
+        IslandPosition::Top => [bx + (bw - w) * 0.5, by + margin],
+        IslandPosition::Bottom => [bx + (bw - w) * 0.5, by + bh - h - margin],
+        IslandPosition::Left => [bx + margin, by + (bh - h) * 0.5],
+        IslandPosition::Right => [bx + bw - w - margin, by + (bh - h) * 0.5],
+    };
+    Some(clamp_window_position(
+        raw,
+        island_size,
+        Some((bx, by, bw, bh)),
+    ))
+}
+
+/// Clamps an arbitrary window position `[x, y]` with `size` `[w, h]` inside screen `bounds`.
+pub fn clamp_window_position(
+    pos: [f32; 2],
+    size: [f32; 2],
+    bounds: Option<(f32, f32, f32, f32)>,
+) -> [f32; 2] {
+    if !pos[0].is_finite() || !pos[1].is_finite() {
+        return [60.0, 60.0];
+    }
+    let (min_x, min_y, max_x, max_y) = match bounds {
+        Some((bx, by, bw, bh)) if bw > size[0] && bh > size[1] => {
+            (bx, by, bx + bw - size[0], by + bh - size[1])
+        }
+        _ => (0.0, 0.0, 1920.0 - size[0], 1080.0 - size[1]),
+    };
+    [pos[0].clamp(min_x, max_x), pos[1].clamp(min_y, max_y)]
+}
+
 /// Configuration for the AI provider and assistant preferences.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -130,10 +206,42 @@ pub struct AppConfig {
     pub organize_target_dir: String,
     #[serde(default)]
     pub pet: PetConfig,
+    #[serde(default)]
+    pub island_position: IslandPosition,
+    #[serde(default)]
+    pub island_custom_position: Option<[f32; 2]>,
+    #[serde(default = "default_island_margin")]
+    pub island_margin: f32,
+    #[serde(default)]
+    pub island_auto_hide: bool,
+    #[serde(default = "default_island_hide_delay")]
+    pub island_hide_delay: u32,
+    #[serde(default = "default_true")]
+    pub island_show_on_hover: bool,
+    #[serde(default = "default_true")]
+    pub island_keep_visible_during_playback: bool,
+    #[serde(default = "default_true")]
+    pub island_keep_visible_during_ai: bool,
+    #[serde(default = "default_audio_volume")]
+    pub audio_volume: u8,
+    #[serde(default)]
+    pub audio_muted: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_island_margin() -> f32 {
+    12.0
+}
+
+fn default_island_hide_delay() -> u32 {
+    5
+}
+
+fn default_audio_volume() -> u8 {
+    80
 }
 
 impl Default for AppConfig {
@@ -156,6 +264,16 @@ impl Default for AppConfig {
             sfx_enabled: true,
             organize_target_dir: default_desktop,
             pet: PetConfig::default(),
+            island_position: IslandPosition::default(),
+            island_custom_position: None,
+            island_margin: default_island_margin(),
+            island_auto_hide: false,
+            island_hide_delay: default_island_hide_delay(),
+            island_show_on_hover: true,
+            island_keep_visible_during_playback: true,
+            island_keep_visible_during_ai: true,
+            audio_volume: default_audio_volume(),
+            audio_muted: false,
         }
     }
 }
@@ -223,6 +341,57 @@ mod tests {
         assert_eq!(cfg.pet.size, PetSize::Normal);
         assert_eq!(cfg.pet.sleep_after_mins, 5);
         assert_eq!(cfg.pet.pet_pos, None);
+        assert_eq!(cfg.island_position, IslandPosition::Top);
+        assert_eq!(cfg.island_hide_delay, 5);
+        assert!(cfg.island_show_on_hover);
+        assert!(cfg.island_keep_visible_during_playback);
+        assert_eq!(cfg.audio_volume, 80);
+        assert!(!cfg.audio_muted);
+    }
+
+    #[test]
+    fn compute_island_position_anchors_to_edges() {
+        let bounds = Some((0.0, 0.0, 1920.0, 1080.0));
+        let size = [360.0, 66.0];
+        assert_eq!(
+            compute_island_position(IslandPosition::Custom, size, bounds, 16.0, None),
+            None
+        );
+        assert_eq!(
+            compute_island_position(
+                IslandPosition::Custom,
+                size,
+                bounds,
+                16.0,
+                Some([-50.0, 2000.0])
+            ),
+            Some([0.0, 1014.0])
+        );
+        assert_eq!(
+            compute_island_position(IslandPosition::Top, size, bounds, 16.0, None),
+            Some([780.0, 16.0])
+        );
+        assert_eq!(
+            compute_island_position(IslandPosition::Bottom, size, bounds, 16.0, None),
+            Some([780.0, 998.0])
+        );
+        assert_eq!(
+            compute_island_position(IslandPosition::Left, size, bounds, 16.0, None),
+            Some([16.0, 507.0])
+        );
+        assert_eq!(
+            compute_island_position(IslandPosition::Right, size, bounds, 16.0, None),
+            Some([1544.0, 507.0])
+        );
+    }
+
+    #[test]
+    fn clamp_window_position_keeps_expanded_on_screen() {
+        let bounds = Some((0.0, 0.0, 1920.0, 1080.0));
+        assert_eq!(
+            clamp_window_position([1544.0, 998.0], [450.0, 650.0], bounds),
+            [1470.0, 430.0]
+        );
     }
 
     #[test]

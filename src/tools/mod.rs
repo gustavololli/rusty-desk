@@ -422,6 +422,25 @@ impl ToolEngine {
                 let llm_msg = format!("{compact_note}{saved_path_str}Contenido:\n\n{llm_preview}");
                 Ok((ui_msg, llm_msg, Some(AssistantMood::Happy)))
             }
+            "add_music_url" => {
+                let url = args["url"].as_str().unwrap_or("").trim();
+                let title = args.get("title").and_then(|v| v.as_str());
+                let (playlist, track) = data
+                    .add_music_url(None, title, url)
+                    .map_err(|e| format!("No se pudo guardar la URL: {e}"))?;
+                let msg = format!(
+                    "URL guardada en '{}': {} ({})",
+                    playlist.name, track.title, track.uri
+                );
+                let llm = format!("Guardado '{}' en '{}'.", track.title, playlist.name);
+                Ok((msg, llm, Some(AssistantMood::Happy)))
+            }
+            "get_weather" => {
+                let city = args["city"].as_str().unwrap_or("").trim();
+                let report = crate::weather::fetch_weather_blocking(city)?;
+                let msg = report.format_message();
+                Ok((msg.clone(), msg, Some(AssistantMood::Happy)))
+            }
             other => Err(format!("Herramienta desconocida: {other}")),
         }
     }
@@ -463,6 +482,16 @@ fn validate_args(spec: &ToolSpec, args: &Value) -> Result<(), String> {
         "convert_to_markdown" => {
             if args["path"].as_str().unwrap_or("").trim().is_empty() {
                 return Err("Argumento inválido: 'path' no puede estar vacío.".to_string());
+            }
+        }
+        "add_music_url" => {
+            let raw = args["url"].as_str().unwrap_or("");
+            crate::music::normalize_audio_url(raw)
+                .map_err(|e| format!("Argumento inválido: {e}"))?;
+        }
+        "get_weather" => {
+            if args["city"].as_str().unwrap_or("").trim().is_empty() {
+                return Err("Argumento inválido: 'city' no puede estar vacío.".to_string());
             }
         }
         _ => {}
@@ -624,6 +653,30 @@ mod tests {
                 name: "add_task",
                 args: json!({ "title": "Comprar leche" })
             })
+        );
+        assert_eq!(
+            parse_local_command("/musica https://radio.example.com/live.mp3 Radio LoFi"),
+            Some(LocalCommand::Tool {
+                name: "add_music_url",
+                args: json!({ "url": "https://radio.example.com/live.mp3", "title": "Radio LoFi" })
+            })
+        );
+        assert_eq!(
+            parse_local_command("/play Radio LoFi"),
+            Some(LocalCommand::PlayMusic(Some("Radio LoFi".to_string())))
+        );
+        assert_eq!(
+            parse_local_command("/play"),
+            Some(LocalCommand::PlayMusic(None))
+        );
+        assert_eq!(parse_local_command("/stop"), Some(LocalCommand::StopMusic));
+        assert_eq!(
+            parse_local_command("/clima Córdoba"),
+            Some(LocalCommand::Weather(Some("Córdoba".to_string())))
+        );
+        assert_eq!(
+            parse_local_command("/clima"),
+            Some(LocalCommand::Weather(None))
         );
         assert!(parse_local_command("hola rusty").is_none());
 

@@ -4,11 +4,13 @@ mod converter;
 mod music;
 mod organizer;
 mod persistence;
+mod platform;
 mod sfx;
 mod state;
 mod tools;
 mod ui;
 mod voice;
+mod weather;
 
 use eframe::egui;
 use ui::RustyDeskApp;

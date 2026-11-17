@@ -28,6 +28,12 @@ pub enum PixelIcon {
     Check,
     Undo,
     FolderOpen,
+    MusicNote,
+    PrevTrack,
+    NextTrack,
+    Stop,
+    VolumeOn,
+    VolumeMuted,
 }
 
 impl PixelIcon {
@@ -162,6 +168,36 @@ impl PixelIcon {
             // Open file / folder
             Self::FolderOpen => [
                 0b01110000, 0b10001110, 0b10000010, 0b11111111, 0b10000001, 0b10000001, 0b11111111,
+                0b00000000,
+            ],
+            // Eighth note / Music
+            Self::MusicNote => [
+                0b00011110, 0b00010010, 0b00010010, 0b00010010, 0b01110110, 0b11111110, 0b01100100,
+                0b00000000,
+            ],
+            // Previous track (|<)
+            Self::PrevTrack => [
+                0b10000010, 0b10000110, 0b10001110, 0b10011110, 0b10011110, 0b10001110, 0b10000110,
+                0b10000010,
+            ],
+            // Next track (>|)
+            Self::NextTrack => [
+                0b01000001, 0b01100001, 0b01110001, 0b01111001, 0b01111001, 0b01110001, 0b01100001,
+                0b01000001,
+            ],
+            // Stop square
+            Self::Stop => [
+                0b00000000, 0b01111110, 0b01111110, 0b01111110, 0b01111110, 0b01111110, 0b01111110,
+                0b00000000,
+            ],
+            // Speaker with sound waves
+            Self::VolumeOn => [
+                0b00010010, 0b00110001, 0b11110101, 0b11110101, 0b11110101, 0b00110001, 0b00010010,
+                0b00000000,
+            ],
+            // Speaker muted (with X)
+            Self::VolumeMuted => [
+                0b00010000, 0b00110101, 0b11110010, 0b11110101, 0b11110000, 0b00110000, 0b00010000,
                 0b00000000,
             ],
         }

@@ -1,15 +1,22 @@
 pub mod avatar;
 pub mod icons8bit;
+pub mod island;
 pub mod pet;
 
 use crate::ai::{
     AiProvider, ChatMessage, GoogleGeminiProvider, MockProvider, OpenAiCompatibleProvider,
 };
-use crate::config::{clamp_pet_position, AppConfig, PetIntensity, PetSize};
+use crate::config::{
+    clamp_pet_position, clamp_window_position, AppConfig, IslandPosition, PetIntensity, PetSize,
+};
 use crate::converter::{self, CompactionMode};
 use crate::music::{self, MusicPlayer};
 use crate::organizer::FileOrganizer;
 use crate::persistence::{ConversationSummary, MessageKind, NewMusicTrack, PersistedTrack};
+use crate::platform::{
+    apply_platform_always_on_top, detect_current_monitor, detect_session_kind,
+    query_x11_virtual_bounds, spawn_global_cursor_tracker, MonitorRect, SessionKind,
+};
 use crate::sfx::{self, SfxEvent};
 use crate::state::{
     format_local_datetime_from_utc, AppData, AssistantMood, HabitItem, PomodoroPhase, TaskItem,
@@ -21,6 +28,7 @@ use crate::tools::{
 };
 use crate::ui::avatar::draw_avatar;
 use crate::ui::icons8bit::{paint_pixel_icon, pixel_button, PixelIcon};
+use crate::ui::island::{IslandInput, IslandStateMachine, IslandVisibility};
 use crate::ui::pet::{
     AnimationController, AnimationFrame, PetBehavior, PetEvent, PetRenderer, WindowMode,
 };
@@ -43,6 +51,14 @@ enum ActiveTab {
     Markdown,
     Compact,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsSubTab {
+    #[default]
+    Ai,
+    Position,
+    Pet,
 }
 
 enum BgEvent {
@@ -68,6 +84,7 @@ enum BgEvent {
     FilePickError(String),
     M3uPicked(Option<PathBuf>),
     M3uPickError(String),
+    WeatherResult(Result<String, String>),
 }
 
 pub struct RustyDeskApp {
@@ -120,11 +137,17 @@ pub struct RustyDeskApp {
 
     music_player: MusicPlayer,
     music_m3u_path_input: String,
+    music_url_input: String,
+    music_url_title_input: String,
     music_selected_playlist_id: Option<String>,
     music_tracks: Vec<PersistedTrack>,
     music_current_track_idx: Option<usize>,
-    music_volume: u8,
     music_status: Option<String>,
+    island_sm: IslandStateMachine,
+    island_dragging: bool,
+    current_monitor: MonitorRect,
+    session_kind: SessionKind,
+    settings_sub_tab: SettingsSubTab,
 
     bg_tx: Sender<BgEvent>,
     bg_rx: Receiver<BgEvent>,
@@ -167,6 +190,14 @@ impl RustyDeskApp {
             .and_then(|id| data.load_playlist_tracks(id).ok())
             .unwrap_or_default();
 
+        let mut music_player = MusicPlayer::default();
+        music_player.set_volume(config.audio_volume);
+        music_player.set_muted(config.audio_muted);
+
+        let screen_bounds = query_x11_virtual_bounds();
+        let current_monitor = detect_current_monitor(&cc.egui_ctx, screen_bounds);
+        let session_kind = detect_session_kind();
+
         Self {
             rt: tokio::runtime::Runtime::new().expect("No se pudo iniciar Tokio"),
             config,
@@ -181,7 +212,7 @@ impl RustyDeskApp {
             pet_drag_origin: None,
             pet_dragging: false,
             last_frame_time: 0.0,
-            screen_bounds: query_x11_screen_bounds(),
+            screen_bounds,
             chat_ui: vec![UiChatEntry::assistant(&welcome)],
             chat_history: vec![ChatMessage::system(&system_prompt)],
             chat_input: String::new(),
@@ -208,13 +239,19 @@ impl RustyDeskApp {
             md_error: None,
             compact_input: String::new(),
             compact_mode_tab: CompactionMode::Moderate,
-            music_player: MusicPlayer::default(),
+            music_player,
             music_m3u_path_input: String::new(),
+            music_url_input: String::new(),
+            music_url_title_input: String::new(),
             music_selected_playlist_id: initial_playlist_id,
             music_tracks: initial_tracks,
             music_current_track_idx: None,
-            music_volume: 80,
             music_status: None,
+            island_sm: IslandStateMachine::default(),
+            island_dragging: false,
+            current_monitor,
+            session_kind,
+            settings_sub_tab: SettingsSubTab::default(),
             bg_tx,
             bg_rx,
             global_cursor,
@@ -311,6 +348,53 @@ impl RustyDeskApp {
                         MessageKind::Text,
                     );
                     self.report_persistence_result(r);
+                }
+                LocalCommand::PlayMusic(query) => {
+                    let msg = self.play_saved_music_by_query(query.as_deref());
+                    let reply = ChatMessage::assistant_text(&msg);
+                    self.chat_ui.push(UiChatEntry::assistant(&msg));
+                    self.chat_history.push(reply.clone());
+                    let r = self.data.record_chat_message(
+                        &self.current_chat_id,
+                        None,
+                        &reply,
+                        MessageKind::Text,
+                    );
+                    self.report_persistence_result(r);
+                }
+                LocalCommand::StopMusic => {
+                    self.music_player.stop();
+                    let msg = "⏹ Reproducción detenida.".to_string();
+                    self.music_status = Some("Reproducción detenida.".to_string());
+                    let reply = ChatMessage::assistant_text(&msg);
+                    self.chat_ui.push(UiChatEntry::assistant(&msg));
+                    self.chat_history.push(reply.clone());
+                    let r = self.data.record_chat_message(
+                        &self.current_chat_id,
+                        None,
+                        &reply,
+                        MessageKind::Text,
+                    );
+                    self.report_persistence_result(r);
+                }
+                LocalCommand::Weather(city) => {
+                    let target_city = city
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|c| !c.is_empty())
+                        .unwrap_or("Buenos Aires")
+                        .to_string();
+                    let tx = self.bg_tx.clone();
+                    let ctx_clone = ctx.clone();
+                    self.is_thinking = true;
+                    self.mood = AssistantMood::Thinking;
+                    self.rt.spawn(async move {
+                        let res = crate::weather::fetch_weather(&target_city)
+                            .await
+                            .map(|r| r.format_message());
+                        let _ = tx.send(BgEvent::WeatherResult(res));
+                        ctx_clone.request_repaint();
+                    });
                 }
                 LocalCommand::Tool { name, args } => {
                     let out = ToolEngine::execute(
@@ -654,6 +738,29 @@ impl RustyDeskApp {
                 BgEvent::M3uPickError(err) => {
                     self.music_status = Some(format!("⚠️ {err}"));
                 }
+                BgEvent::WeatherResult(res) => {
+                    self.is_thinking = false;
+                    let msg = match res {
+                        Ok(text) => {
+                            self.mood = AssistantMood::Happy;
+                            text
+                        }
+                        Err(err) => {
+                            self.mood = AssistantMood::Idle;
+                            format!("⚠️ {err}")
+                        }
+                    };
+                    let reply = ChatMessage::assistant_text(&msg);
+                    self.chat_ui.push(UiChatEntry::assistant(&msg));
+                    self.chat_history.push(reply.clone());
+                    let r = self.data.record_chat_message(
+                        &self.current_chat_id,
+                        None,
+                        &reply,
+                        MessageKind::Text,
+                    );
+                    self.report_persistence_result(r);
+                }
             }
         }
     }
@@ -965,6 +1072,14 @@ impl RustyDeskApp {
         self.emit_pet_event_for_tool("pause_pomodoro", &out.status);
     }
 
+    fn island_expanded_size(&self, music_active: bool) -> [f32; 2] {
+        if music_active {
+            [360.0, 118.0]
+        } else {
+            [360.0, 66.0]
+        }
+    }
+
     fn set_window_mode(&mut self, ctx: &egui::Context, target: WindowMode) {
         if self.window_mode == WindowMode::Pet && target != WindowMode::Pet {
             if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
@@ -974,6 +1089,15 @@ impl RustyDeskApp {
             self.pet_drag_origin = None;
             self.pet_dragging = false;
         }
+        if self.window_mode == WindowMode::Island && target != WindowMode::Island {
+            if self.config.island_position == IslandPosition::Custom {
+                if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+                    self.config.island_custom_position = Some([outer.min.x, outer.min.y]);
+                    let _ = self.config.save();
+                }
+            }
+            self.island_dragging = false;
+        }
 
         let target = if target == WindowMode::Pet && !self.config.pet.enabled {
             WindowMode::Island
@@ -982,9 +1106,14 @@ impl RustyDeskApp {
         };
 
         self.window_mode = target;
+        let music_active = self.music_player.is_active();
         let (min_size, size) = match target {
             WindowMode::Expanded => (Vec2::new(320.0, 360.0), Vec2::new(450.0, 650.0)),
-            WindowMode::Island => (Vec2::new(320.0, 64.0), Vec2::new(360.0, 66.0)),
+            WindowMode::Island => {
+                self.island_sm.reset_visible();
+                let s = self.island_expanded_size(music_active);
+                (Vec2::new(10.0, 10.0), Vec2::from(s))
+            }
             WindowMode::Pet => {
                 let s = self.config.pet.size.pixels();
                 (Vec2::new(64.0, 64.0), Vec2::splat(s))
@@ -1005,13 +1134,51 @@ impl RustyDeskApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
         apply_platform_always_on_top(want_on_top);
 
-        if target == WindowMode::Pet {
-            if let Some(pos) = self.config.pet.pet_pos {
-                let clamped =
-                    clamp_pet_position(pos, self.config.pet.size.pixels(), self.screen_bounds);
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(
-                    clamped[0], clamped[1],
-                )));
+        match target {
+            WindowMode::Pet => {
+                if let Some(pos) = self.config.pet.pet_pos {
+                    let clamped = clamp_pet_position(
+                        pos,
+                        self.config.pet.size.pixels(),
+                        Some(self.current_monitor.as_tuple()),
+                    );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(
+                        clamped[0], clamped[1],
+                    )));
+                }
+            }
+            WindowMode::Island => {
+                if self.session_kind != SessionKind::Wayland {
+                    if let Some(pos) = crate::config::compute_island_position(
+                        self.config.island_position,
+                        [size.x, size.y],
+                        Some(self.current_monitor.as_tuple()),
+                        self.config.island_margin,
+                        self.config.island_custom_position,
+                    ) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(
+                            pos[0], pos[1],
+                        )));
+                        let _ = self
+                            .island_sm
+                            .should_apply_geometry([size.x, size.y], Some(pos));
+                    }
+                }
+            }
+            WindowMode::Expanded => {
+                if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+                    let pos = [outer.min.x, outer.min.y];
+                    let clamped = clamp_window_position(
+                        pos,
+                        [size.x, size.y],
+                        Some(self.current_monitor.as_tuple()),
+                    );
+                    if clamped != pos {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(
+                            clamped[0], clamped[1],
+                        )));
+                    }
+                }
             }
         }
 
@@ -1019,10 +1186,26 @@ impl RustyDeskApp {
         self.emit_pet_event(PetEvent::ModeChanged(target));
     }
 
-    fn handle_drag(&self, ui: &egui::Ui, ctx: &egui::Context, rect: egui::Rect) {
+    fn handle_drag(&mut self, ui: &egui::Ui, ctx: &egui::Context, rect: egui::Rect) {
         let resp = ui.interact(rect, ui.id().with("island_drag"), egui::Sense::drag());
         if resp.drag_started() {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        self.island_dragging = resp.dragged();
+        if resp.drag_stopped() && self.window_mode == WindowMode::Island {
+            if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+                if self.config.island_position == IslandPosition::Custom {
+                    self.config.island_custom_position = Some([outer.min.x, outer.min.y]);
+                } else {
+                    self.config.island_position = crate::ui::island::infer_nearest_edge(
+                        [outer.min.x, outer.min.y],
+                        [outer.width(), outer.height()],
+                        self.current_monitor,
+                    );
+                }
+                let _ = self.config.save();
+                self.island_sm.invalidate_geometry();
+            }
         }
     }
 }
@@ -1048,7 +1231,13 @@ impl eframe::App for RustyDeskApp {
         };
         self.last_frame_time = time;
 
-        let is_busy = self.is_thinking || self.active_recording.is_some() || self.md_is_converting;
+        self.current_monitor = detect_current_monitor(ctx, self.screen_bounds);
+
+        let music_active = self.music_player.is_active();
+        let music_playing = self.music_player.is_playing();
+        let ai_busy = self.is_thinking || self.md_is_converting;
+        let is_busy = ai_busy || self.active_recording.is_some() || music_playing;
+        self.pet_controller.set_music_playing(music_playing);
         if let Some(auto_event) = self.pet_behavior.tick(time, is_busy, &self.config.pet) {
             self.pet_controller
                 .on_event(auto_event, &self.config.pet, self.mood);
@@ -1073,6 +1262,89 @@ impl eframe::App for RustyDeskApp {
                 .pet_controller
                 .recommended_repaint_ms(is_hovered, &self.config.pet);
             ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
+            return;
+        }
+
+        if self.window_mode == WindowMode::Island {
+            let expanded_size = self.island_expanded_size(music_active);
+            let (pointer_in_window, is_interacting, has_open_menu) = (
+                ctx.input(|i| i.pointer.hover_pos().is_some()),
+                ctx.input(|i| i.pointer.any_down()) || ctx.wants_pointer_input(),
+                ctx.memory(|m| m.any_popup_open()),
+            );
+            let is_hidden_now = self.island_sm.visibility == IslandVisibility::Hidden;
+            let island_in = IslandInput {
+                now: time,
+                dt,
+                auto_hide: self.config.island_auto_hide,
+                hide_delay_secs: self.config.island_hide_delay,
+                show_on_hover: self.config.island_show_on_hover,
+                keep_visible_during_playback: self.config.island_keep_visible_during_playback,
+                keep_visible_during_ai: self.config.island_keep_visible_during_ai,
+                pointer_in_island: !is_hidden_now && pointer_in_window,
+                pointer_in_tab: is_hidden_now && pointer_in_window,
+                is_dragging: self.island_dragging,
+                is_interacting,
+                has_open_menu,
+                is_recording: self.active_recording.is_some(),
+                music_active,
+                ai_busy,
+            };
+            let out = self.island_sm.step(
+                &island_in,
+                self.config.island_position,
+                self.current_monitor,
+                self.config.island_margin,
+                self.config.island_custom_position,
+                expanded_size,
+            );
+
+            if self.island_sm.should_apply_geometry(out.size, out.pos) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(10.0, 10.0)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::from(out.size)));
+                if self.session_kind != SessionKind::Wayland {
+                    if let Some([x, y]) = out.pos {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(
+                            x, y,
+                        )));
+                    }
+                }
+            }
+
+            let repaint_ms = if out.is_animating {
+                16
+            } else if out.visibility == IslandVisibility::Hidden {
+                120
+            } else if out.visibility == IslandVisibility::WaitingToHide {
+                100
+            } else {
+                33
+            };
+            ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
+
+            if out.visibility == IslandVisibility::Hidden {
+                egui::CentralPanel::default()
+                    .frame(outer_frame)
+                    .show(ctx, |ui| {
+                        self.render_island_hidden_tab(ui, accent);
+                    });
+                return;
+            }
+
+            egui::CentralPanel::default()
+                .frame(outer_frame)
+                .show(ctx, |ui| {
+                    let island_frame = egui::Frame::none()
+                        .fill(glass_bg)
+                        .rounding(Rounding::same(4.0))
+                        .stroke(Stroke::new(2.0_f32, border_color))
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0));
+
+                    island_frame.show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        self.render_compact_island(ui, ctx, time, pointer_pos, accent);
+                    });
+                });
             return;
         }
 
@@ -1297,6 +1569,18 @@ impl eframe::App for RustyDeskApp {
 
                     ui.add_space(8.0);
 
+                    if music_active {
+                        egui::Frame::none()
+                            .fill(Color32::from_rgb(20, 27, 45))
+                            .rounding(8.0)
+                            .stroke(Stroke::new(1.0_f32, accent.linear_multiply(0.45)))
+                            .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                            .show(ui, |ui| {
+                                self.render_music_mini_controls(ui, accent, false);
+                            });
+                        ui.add_space(6.0);
+                    }
+
                     if let Some(banner) = &self.status_banner {
                         egui::Frame::none()
                             .fill(Color32::from_rgba_unmultiplied(250, 204, 21, 25))
@@ -1317,7 +1601,7 @@ impl eframe::App for RustyDeskApp {
                         ActiveTab::Organizer => self.render_organizer_tab(ui, accent),
                         ActiveTab::Markdown => self.render_markdown_tab(ui, ctx, accent),
                         ActiveTab::Compact => self.render_compact_tab(ui, ctx, accent),
-                        ActiveTab::Settings => self.render_settings_tab(ui),
+                        ActiveTab::Settings => self.render_settings_tab(ui, accent),
                     }
                 });
             });
@@ -1407,6 +1691,28 @@ impl RustyDeskApp {
                 self.set_window_mode(ctx, WindowMode::Expanded);
                 ui.close_menu();
             }
+            if self.music_player.is_active() {
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("♫ {}", self.current_music_title()))
+                        .size(11.5)
+                        .strong(),
+                );
+                ui.horizontal(|ui| {
+                    let pause_lbl = if self.music_player.is_paused() {
+                        "Reanudar"
+                    } else {
+                        "Pausar"
+                    };
+                    if ui.small_button(pause_lbl).clicked() {
+                        self.music_player.toggle_pause();
+                    }
+                    if ui.small_button("Detener").clicked() {
+                        self.stop_music();
+                    }
+                });
+                self.render_volume_controls(ui, 90.0, true);
+            }
             ui.separator();
             if ui.button("Ocultar mascota").clicked() {
                 self.config.pet.enabled = false;
@@ -1423,6 +1729,30 @@ impl RustyDeskApp {
         resp.hovered()
     }
 
+    fn render_island_hidden_tab(&mut self, ui: &mut egui::Ui, accent: Color32) {
+        let avail = ui.available_rect_before_wrap();
+        let painter = ui.painter();
+        let bg = Color32::from_rgba_unmultiplied(11, 15, 25, 240);
+        painter.rect_filled(avail, 3.0, bg);
+        painter.rect_stroke(avail, 3.0, Stroke::new(1.5_f32, accent));
+
+        // Pixel-art 3-dot grip indicator centered along the tab's long axis.
+        let horizontal = avail.width() >= avail.height();
+        let center = avail.center();
+        for offset in [-8.0_f32, 0.0, 8.0] {
+            let dot_center = if horizontal {
+                Pos2::new(center.x + offset, center.y)
+            } else {
+                Pos2::new(center.x, center.y + offset)
+            };
+            painter.rect_filled(
+                egui::Rect::from_center_size(dot_center, Vec2::splat(3.0)),
+                0.0,
+                accent,
+            );
+        }
+    }
+
     fn render_compact_island(
         &mut self,
         ui: &mut egui::Ui,
@@ -1431,86 +1761,94 @@ impl RustyDeskApp {
         pointer_pos: Option<Pos2>,
         accent: Color32,
     ) {
-        ui.horizontal_centered(|ui| {
-            let drag_area = ui.horizontal_centered(|ui| {
-                draw_avatar(ui, 44.0, self.mood, time, pointer_pos);
-                ui.add_space(4.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(&self.config.assistant_name)
-                            .strong()
-                            .size(13.5)
-                            .color(Color32::WHITE),
-                    );
-                    let sub = if self.data.pomodoro.running {
-                        format!("Pomodoro {}", self.data.pomodoro.formatted_time())
-                    } else if self.is_thinking {
-                        "Pensando...".to_string()
-                    } else {
-                        let pending = self.data.tasks.iter().filter(|t| !t.done).count();
-                        format!("{pending} pendientes")
-                    };
-                    ui.label(RichText::new(sub).size(11.0).color(accent));
+        let music_active = self.music_player.is_active();
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                let drag_area = ui.horizontal(|ui| {
+                    draw_avatar(ui, 44.0, self.mood, time, pointer_pos);
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(&self.config.assistant_name)
+                                .strong()
+                                .size(13.5)
+                                .color(Color32::WHITE),
+                        );
+                        let sub = if self.data.pomodoro.running {
+                            format!("Pomodoro {}", self.data.pomodoro.formatted_time())
+                        } else if self.is_thinking {
+                            "Pensando...".to_string()
+                        } else {
+                            let pending = self.data.tasks.iter().filter(|t| !t.done).count();
+                            format!("{pending} pendientes")
+                        };
+                        ui.label(RichText::new(sub).size(11.0).color(accent));
+                    });
                 });
-            });
-            self.handle_drag(ui, ctx, drag_area.response.rect);
+                self.handle_drag(ui, ctx, drag_area.response.rect);
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if pixel_button(
-                    ui,
-                    PixelIcon::Close,
-                    "",
-                    Color32::from_rgb(153, 27, 27),
-                    Color32::WHITE,
-                    "Cerrar",
-                )
-                .clicked()
-                {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                if self.config.pet.enabled
-                    && pixel_button(
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if pixel_button(
                         ui,
-                        PixelIcon::Eye,
+                        PixelIcon::Close,
                         "",
-                        Color32::from_rgb(30, 41, 59),
+                        Color32::from_rgb(153, 27, 27),
                         Color32::WHITE,
-                        "Modo Mascota",
+                        "Cerrar",
                     )
                     .clicked()
-                {
-                    self.set_window_mode(ctx, WindowMode::Pet);
-                }
-                if pixel_button(
-                    ui,
-                    PixelIcon::Island,
-                    "Abrir",
-                    Color32::from_rgb(30, 41, 59),
-                    Color32::WHITE,
-                    "Expandir panel",
-                )
-                .clicked()
-                {
-                    self.set_window_mode(ctx, WindowMode::Expanded);
-                }
-                let (mic_lbl, mic_bg) = if self.active_recording.is_some() {
-                    ("Parar", Color32::from_rgb(190, 18, 60))
-                } else {
-                    ("Voz", Color32::from_rgb(30, 41, 59))
-                };
-                if pixel_button(
-                    ui,
-                    PixelIcon::Mic,
-                    mic_lbl,
-                    mic_bg,
-                    Color32::WHITE,
-                    "Hablar por micrófono",
-                )
-                .clicked()
-                {
-                    self.toggle_voice_recording(ctx);
-                }
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if self.config.pet.enabled
+                        && pixel_button(
+                            ui,
+                            PixelIcon::Eye,
+                            "",
+                            Color32::from_rgb(30, 41, 59),
+                            Color32::WHITE,
+                            "Modo Mascota",
+                        )
+                        .clicked()
+                    {
+                        self.set_window_mode(ctx, WindowMode::Pet);
+                    }
+                    if pixel_button(
+                        ui,
+                        PixelIcon::Island,
+                        "Abrir",
+                        Color32::from_rgb(30, 41, 59),
+                        Color32::WHITE,
+                        "Expandir panel",
+                    )
+                    .clicked()
+                    {
+                        self.set_window_mode(ctx, WindowMode::Expanded);
+                    }
+                    let (mic_lbl, mic_bg) = if self.active_recording.is_some() {
+                        ("Parar", Color32::from_rgb(190, 18, 60))
+                    } else {
+                        ("Voz", Color32::from_rgb(30, 41, 59))
+                    };
+                    if pixel_button(
+                        ui,
+                        PixelIcon::Mic,
+                        mic_lbl,
+                        mic_bg,
+                        Color32::WHITE,
+                        "Hablar por micrófono",
+                    )
+                    .clicked()
+                    {
+                        self.toggle_voice_recording(ctx);
+                    }
+                });
             });
+
+            if music_active {
+                ui.add_space(4.0);
+                self.render_music_mini_controls(ui, accent, true);
+            }
         });
     }
 
@@ -2227,6 +2565,31 @@ impl RustyDeskApp {
         }
     }
 
+    fn add_music_url_from_input(&mut self, raw_url: &str, raw_title: Option<&str>) {
+        match self.data.add_music_url(
+            self.music_selected_playlist_id.as_deref(),
+            raw_title,
+            raw_url,
+        ) {
+            Ok((playlist, track)) => {
+                if self.music_selected_playlist_id.as_deref() == Some(playlist.id.as_str()) {
+                    self.music_tracks.push(track.clone());
+                } else {
+                    self.select_music_playlist(&playlist.id);
+                }
+                self.music_status = Some(format!(
+                    "URL guardada en '{}': {}",
+                    playlist.name, track.title
+                ));
+                self.music_url_input.clear();
+                self.music_url_title_input.clear();
+            }
+            Err(e) => {
+                self.music_status = Some(format!("⚠️ {e}"));
+            }
+        }
+    }
+
     fn select_music_playlist(&mut self, playlist_id: &str) {
         self.music_selected_playlist_id = Some(playlist_id.to_string());
         self.music_current_track_idx = None;
@@ -2241,11 +2604,139 @@ impl RustyDeskApp {
         }
     }
 
+    fn play_saved_music_by_query(&mut self, query: Option<&str>) -> String {
+        let Some(raw_q) = query.map(str::trim).filter(|q| !q.is_empty()) else {
+            if self.music_tracks.is_empty() {
+                let Some(first_id) = self.data.playlists.first().map(|p| p.id.clone()) else {
+                    return "⚠️ No hay pistas guardadas. Usá `/musica <url> [nombre]` para guardar una.".to_string();
+                };
+                self.select_music_playlist(&first_id);
+            }
+            if self.music_tracks.is_empty() {
+                return "⚠️ No hay pistas para reproducir.".to_string();
+            }
+            let idx = self.music_current_track_idx.unwrap_or(0);
+            self.play_music_track_at(idx);
+            return self
+                .music_status
+                .clone()
+                .unwrap_or_else(|| "▶ Reproduciendo".to_string());
+        };
+
+        if let Ok(num) = raw_q.parse::<usize>() {
+            if num >= 1 && num <= self.music_tracks.len() {
+                self.play_music_track_at(num - 1);
+                return self
+                    .music_status
+                    .clone()
+                    .unwrap_or_else(|| "▶ Reproduciendo".to_string());
+            }
+        }
+
+        let needle = raw_q.to_lowercase();
+        if let Some(idx) = self.music_tracks.iter().position(|t| {
+            t.title.to_lowercase().contains(&needle) || t.uri.to_lowercase().contains(&needle)
+        }) {
+            self.play_music_track_at(idx);
+            return self
+                .music_status
+                .clone()
+                .unwrap_or_else(|| "▶ Reproduciendo".to_string());
+        }
+
+        let playlist_ids: Vec<String> = self.data.playlists.iter().map(|p| p.id.clone()).collect();
+        for pid in playlist_ids {
+            if let Ok(tracks) = self.data.load_playlist_tracks(&pid) {
+                if let Some(idx) = tracks.iter().position(|t| {
+                    t.title.to_lowercase().contains(&needle)
+                        || t.uri.to_lowercase().contains(&needle)
+                }) {
+                    self.select_music_playlist(&pid);
+                    self.play_music_track_at(idx);
+                    return self
+                        .music_status
+                        .clone()
+                        .unwrap_or_else(|| "▶ Reproduciendo".to_string());
+                }
+            }
+        }
+
+        format!("⚠️ No encontré ninguna pista guardada que coincida con '{raw_q}'.")
+    }
+
+    fn sync_audio_volume(&mut self, vol: u8, save_now: bool) {
+        self.config.audio_volume = vol.min(100);
+        self.music_player.set_volume(self.config.audio_volume);
+        if save_now {
+            let _ = self.config.save();
+        }
+    }
+
+    fn toggle_audio_mute(&mut self) {
+        let next = self.music_player.toggle_mute();
+        self.config.audio_muted = next;
+        let _ = self.config.save();
+    }
+
+    fn render_volume_controls(&mut self, ui: &mut egui::Ui, slider_width: f32, show_pct: bool) {
+        let muted = self.config.audio_muted;
+        let mute_icon = if muted {
+            PixelIcon::VolumeMuted
+        } else {
+            PixelIcon::VolumeOn
+        };
+        let mute_bg = if muted {
+            Color32::from_rgb(153, 27, 27)
+        } else {
+            Color32::from_rgb(30, 41, 59)
+        };
+        if pixel_button(
+            ui,
+            mute_icon,
+            "",
+            mute_bg,
+            Color32::WHITE,
+            if muted { "Activar sonido" } else { "Silenciar" },
+        )
+        .clicked()
+        {
+            self.toggle_audio_mute();
+        }
+
+        let mut vol = self.config.audio_volume;
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = slider_width;
+            let resp = ui
+                .add(egui::Slider::new(&mut vol, 0..=100).show_value(false))
+                .on_hover_text(format!("Volumen: {}%", self.config.audio_volume));
+            if resp.changed() {
+                self.sync_audio_volume(vol, false);
+            }
+            if resp.drag_stopped() || resp.lost_focus() {
+                let _ = self.config.save();
+            }
+        });
+
+        if show_pct {
+            let pct_text = if muted {
+                format!("0% ({}%)", self.config.audio_volume)
+            } else {
+                format!("{}%", self.config.audio_volume)
+            };
+            ui.label(RichText::new(pct_text).size(11.0).color(if muted {
+                Color32::from_gray(140)
+            } else {
+                Color32::from_gray(220)
+            }));
+        }
+    }
+
     fn play_music_track_at(&mut self, idx: usize) {
         let Some(track) = self.music_tracks.get(idx).cloned() else {
             return;
         };
-        self.music_player.set_volume(self.music_volume);
+        self.music_player.set_volume(self.config.audio_volume);
+        self.music_player.set_muted(self.config.audio_muted);
         match self.music_player.play(&track.uri) {
             Ok(()) => {
                 self.music_current_track_idx = Some(idx);
@@ -2273,7 +2764,171 @@ impl RustyDeskApp {
         self.play_music_track_at(next);
     }
 
+    fn play_prev_music_track(&mut self) {
+        if self.music_tracks.is_empty() {
+            self.music_current_track_idx = None;
+            return;
+        }
+        let prev = match self.music_current_track_idx {
+            Some(i) if i > 0 => i - 1,
+            _ => self.music_tracks.len() - 1,
+        };
+        self.play_music_track_at(prev);
+    }
+
+    fn play_next_music_track_manual(&mut self) {
+        if self.music_tracks.is_empty() {
+            self.music_current_track_idx = None;
+            return;
+        }
+        let next = match self.music_current_track_idx {
+            Some(i) if i + 1 < self.music_tracks.len() => i + 1,
+            _ => 0,
+        };
+        self.play_music_track_at(next);
+    }
+
+    fn stop_music(&mut self) {
+        self.music_player.stop();
+        self.music_status = Some("Reproducción detenida.".to_string());
+    }
+
+    fn current_music_title(&self) -> String {
+        self.music_current_track_idx
+            .and_then(|idx| self.music_tracks.get(idx))
+            .map(|t| t.title.clone())
+            .unwrap_or_else(|| "Música en reproducción".to_string())
+    }
+
+    fn render_music_mini_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        accent: Color32,
+        compact_island: bool,
+    ) {
+        let title = self.current_music_title();
+        let has_multiple = self.music_tracks.len() > 1;
+        let is_paused = self.music_player.is_paused();
+
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                let (icon_rect, _) =
+                    ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
+                paint_pixel_icon(ui.painter(), icon_rect, PixelIcon::MusicNote, accent);
+
+                let controls_w = if has_multiple { 122.0 } else { 62.0 }
+                    + if compact_island { 0.0 } else { 140.0 };
+                let title_w = (ui.available_width() - controls_w).max(60.0);
+
+                ui.allocate_ui_with_layout(
+                    Vec2::new(title_w, 22.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let lbl = ui.add(
+                            egui::Label::new(
+                                RichText::new(&title).size(11.5).color(Color32::WHITE),
+                            )
+                            .truncate()
+                            .sense(if compact_island {
+                                egui::Sense::hover()
+                            } else {
+                                egui::Sense::click()
+                            }),
+                        );
+                        if !compact_island && lbl.clicked() {
+                            self.active_tab = ActiveTab::Music;
+                        }
+                    },
+                );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if has_multiple
+                        && pixel_button(
+                            ui,
+                            PixelIcon::NextTrack,
+                            "",
+                            Color32::from_rgb(30, 41, 59),
+                            Color32::WHITE,
+                            "Siguiente pista",
+                        )
+                        .clicked()
+                    {
+                        self.play_next_music_track_manual();
+                    }
+
+                    if pixel_button(
+                        ui,
+                        PixelIcon::Stop,
+                        "",
+                        Color32::from_rgb(153, 27, 27),
+                        Color32::WHITE,
+                        "Detener música",
+                    )
+                    .clicked()
+                    {
+                        self.stop_music();
+                    }
+
+                    if pixel_button(
+                        ui,
+                        if is_paused {
+                            PixelIcon::Play
+                        } else {
+                            PixelIcon::Pause
+                        },
+                        "",
+                        Color32::from_rgb(30, 41, 59),
+                        Color32::WHITE,
+                        if is_paused { "Reanudar" } else { "Pausar" },
+                    )
+                    .clicked()
+                    {
+                        self.music_player.toggle_pause();
+                    }
+
+                    if has_multiple
+                        && pixel_button(
+                            ui,
+                            PixelIcon::PrevTrack,
+                            "",
+                            Color32::from_rgb(30, 41, 59),
+                            Color32::WHITE,
+                            "Pista anterior",
+                        )
+                        .clicked()
+                    {
+                        self.play_prev_music_track();
+                    }
+
+                    if !compact_island {
+                        self.render_volume_controls(ui, 68.0, true);
+                    }
+                });
+            });
+
+            if compact_island {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    self.render_volume_controls(ui, 185.0, true);
+                });
+            }
+        });
+    }
+
     fn render_music_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, accent: Color32) {
+        if let Some(sel_id) = self.music_selected_playlist_id.clone() {
+            if self
+                .data
+                .playlists
+                .iter()
+                .find(|p| p.id == sel_id)
+                .is_some_and(|p| p.track_count != self.music_tracks.len())
+            {
+                if let Ok(tracks) = self.data.load_playlist_tracks(&sel_id) {
+                    self.music_tracks = tracks;
+                }
+            }
+        }
         ui.label(RichText::new("Agregar playlist (.m3u / .m3u8)").strong());
         ui.horizontal(|ui| {
             let input_resp = ui.add_sized(
@@ -2294,8 +2949,14 @@ impl RustyDeskApp {
                 || enter)
                 && !self.music_m3u_path_input.trim().is_empty()
             {
-                let p = PathBuf::from(self.music_m3u_path_input.trim());
-                self.import_m3u_from_path(&p);
+                let trimmed = self.music_m3u_path_input.trim().to_string();
+                if music::is_remote_or_uri(&trimmed) {
+                    self.add_music_url_from_input(&trimmed, None);
+                    self.music_m3u_path_input.clear();
+                } else {
+                    let p = PathBuf::from(trimmed);
+                    self.import_m3u_from_path(&p);
+                }
             }
             if pixel_button(
                 ui,
@@ -2312,30 +2973,85 @@ impl RustyDeskApp {
         });
 
         ui.add_space(6.0);
+        ui.label(RichText::new("Agregar URL (radio / stream / audio)").strong());
+        ui.horizontal(|ui| {
+            let url_resp = ui.add_sized(
+                [ui.available_width() * 0.56, 26.0],
+                egui::TextEdit::singleline(&mut self.music_url_input)
+                    .hint_text("https://... (stream o audio)"),
+            );
+            let title_resp = ui.add_sized(
+                [(ui.available_width() - 108.0).max(70.0), 26.0],
+                egui::TextEdit::singleline(&mut self.music_url_title_input)
+                    .hint_text("Nombre (opcional)"),
+            );
+            let enter = (url_resp.lost_focus() || title_resp.lost_focus())
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (pixel_button(
+                ui,
+                PixelIcon::Save,
+                "Guardar URL",
+                accent,
+                Color32::from_rgb(15, 20, 32),
+                "Guardar URL en SQLite",
+            )
+            .clicked()
+                || enter)
+                && !self.music_url_input.trim().is_empty()
+            {
+                let url = self.music_url_input.clone();
+                let title = self.music_url_title_input.clone();
+                self.add_music_url_from_input(&url, Some(&title));
+            }
+        });
+
+        ui.add_space(6.0);
         // Minimum playback controls: Play, Stop, Volume
-        let is_playing = self.music_player.is_playing();
+        let is_active = self.music_player.is_active();
+        let is_paused = self.music_player.is_paused();
         egui::Frame::none()
             .fill(Color32::from_rgb(20, 27, 45))
             .rounding(8.0)
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if pixel_button(
+                    if !is_active {
+                        if pixel_button(
+                            ui,
+                            PixelIcon::Play,
+                            "Play",
+                            Color32::from_rgb(22, 163, 74),
+                            Color32::WHITE,
+                            "Reproducir pista seleccionada o primera",
+                        )
+                        .clicked()
+                        {
+                            let idx = self.music_current_track_idx.unwrap_or(0);
+                            self.play_music_track_at(idx);
+                        }
+                    } else if pixel_button(
                         ui,
-                        PixelIcon::Play,
-                        "Play",
-                        Color32::from_rgb(22, 163, 74),
+                        if is_paused {
+                            PixelIcon::Play
+                        } else {
+                            PixelIcon::Pause
+                        },
+                        if is_paused { "Seguir" } else { "Pausa" },
+                        Color32::from_rgb(30, 64, 175),
                         Color32::WHITE,
-                        "Reproducir pista seleccionada o primera",
+                        if is_paused {
+                            "Reanudar reproducción"
+                        } else {
+                            "Pausar reproducción"
+                        },
                     )
                     .clicked()
                     {
-                        let idx = self.music_current_track_idx.unwrap_or(0);
-                        self.play_music_track_at(idx);
+                        self.music_player.toggle_pause();
                     }
                     if pixel_button(
                         ui,
-                        PixelIcon::Pause,
+                        PixelIcon::Stop,
                         "Stop",
                         Color32::from_rgb(153, 27, 27),
                         Color32::WHITE,
@@ -2343,24 +3059,20 @@ impl RustyDeskApp {
                     )
                     .clicked()
                     {
-                        self.music_player.stop();
-                        self.music_status = Some("Reproducción detenida.".to_string());
+                        self.stop_music();
                     }
 
-                    ui.add_space(8.0);
-                    ui.label("Vol:");
-                    let mut vol = self.music_volume;
-                    if ui
-                        .add(egui::Slider::new(&mut vol, 0..=100).suffix("%"))
-                        .changed()
-                    {
-                        self.music_volume = vol;
-                        self.music_player.set_volume(vol);
-                    }
+                    ui.add_space(6.0);
+                    self.render_volume_controls(ui, 100.0, true);
                 });
 
-                let now_playing = match (is_playing, self.music_current_track_idx) {
-                    (true, Some(idx)) => self
+                let now_playing = match (is_active, is_paused, self.music_current_track_idx) {
+                    (true, true, Some(idx)) => self
+                        .music_tracks
+                        .get(idx)
+                        .map(|t| format!("⏸ {} (en pausa)", t.title))
+                        .unwrap_or_else(|| "⏸ En pausa".to_string()),
+                    (true, false, Some(idx)) => self
                         .music_tracks
                         .get(idx)
                         .map(|t| format!("▶ {}", t.title))
@@ -2444,6 +3156,7 @@ impl RustyDeskApp {
         ui.label(RichText::new("Pistas").strong());
 
         let mut clicked_track: Option<usize> = None;
+        let mut track_to_delete: Option<(usize, String, String)> = None;
         egui::ScrollArea::vertical()
             .id_salt("music_tracks_scroll")
             .show(ui, |ui| {
@@ -2462,12 +3175,49 @@ impl RustyDeskApp {
                             }
                             None => format!("{}. {}", idx + 1, track.title),
                         };
-                        if ui.selectable_label(active, label).clicked() {
-                            clicked_track = Some(idx);
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(active, label).clicked() {
+                                clicked_track = Some(idx);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if pixel_button(
+                                        ui,
+                                        PixelIcon::Clear,
+                                        "",
+                                        Color32::from_rgb(127, 29, 29),
+                                        Color32::WHITE,
+                                        "Eliminar pista",
+                                    )
+                                    .clicked()
+                                    {
+                                        track_to_delete = Some((
+                                            idx,
+                                            track.playlist_id.clone(),
+                                            track.id.clone(),
+                                        ));
+                                    }
+                                },
+                            );
+                        });
                     }
                 }
             });
+
+        if let Some((idx, playlist_id, track_id)) = track_to_delete {
+            if self.music_current_track_idx == Some(idx) {
+                self.music_player.stop();
+                self.music_current_track_idx = None;
+            } else if let Some(cur) = self.music_current_track_idx {
+                if cur > idx {
+                    self.music_current_track_idx = Some(cur - 1);
+                }
+            }
+            self.music_tracks.remove(idx);
+            let r = self.data.delete_music_track(&playlist_id, &track_id);
+            self.report_persistence_result(r);
+        }
 
         if let Some(idx) = clicked_track {
             self.play_music_track_at(idx);
@@ -2923,7 +3673,78 @@ impl RustyDeskApp {
             });
     }
 
-    fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
+    fn render_settings_tab(&mut self, ui: &mut egui::Ui, accent: Color32) {
+        egui::Frame::none()
+            .fill(Color32::from_rgb(20, 27, 45))
+            .rounding(10.0)
+            .inner_margin(4.0)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (tab, label) in [
+                        (SettingsSubTab::Ai, "IA y Audio"),
+                        (SettingsSubTab::Position, "Posición e Isla"),
+                        (SettingsSubTab::Pet, "Mascota"),
+                    ] {
+                        let selected = self.settings_sub_tab == tab;
+                        let fill = if selected {
+                            accent
+                        } else {
+                            Color32::from_rgb(30, 41, 59)
+                        };
+                        let text_color = if selected {
+                            Color32::from_rgb(15, 20, 32)
+                        } else {
+                            Color32::from_gray(220)
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(label).size(12.0).color(text_color),
+                                )
+                                .fill(fill)
+                                .rounding(6.0),
+                            )
+                            .clicked()
+                        {
+                            self.settings_sub_tab = tab;
+                        }
+                    }
+                });
+            });
+
+        ui.add_space(8.0);
+
+        let save_bar_h = 38.0;
+        let scroll_h = (ui.available_height() - save_bar_h).max(120.0);
+        egui::ScrollArea::vertical()
+            .id_salt("settings_scroll")
+            .max_height(scroll_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| match self.settings_sub_tab {
+                SettingsSubTab::Ai => self.render_settings_ai_section(ui),
+                SettingsSubTab::Position => self.render_settings_position_section(ui),
+                SettingsSubTab::Pet => self.render_settings_pet_section(ui),
+            });
+
+        ui.add_space(8.0);
+        if pixel_button(
+            ui,
+            PixelIcon::Save,
+            "Guardar configuracion",
+            Color32::from_rgb(30, 64, 175),
+            Color32::WHITE,
+            "Guardar cambios en config.json",
+        )
+        .clicked()
+        {
+            match self.config.save() {
+                Ok(_) => self.status_banner = Some("Configuración guardada.".to_string()),
+                Err(e) => self.status_banner = Some(format!("Error al guardar: {e}")),
+            }
+        }
+    }
+
+    fn render_settings_ai_section(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Presets rápidos de API").strong());
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("Google Gemini").clicked() {
@@ -3007,9 +3828,87 @@ impl RustyDeskApp {
             .size(10.5)
             .color(Color32::GRAY),
         );
+    }
 
-        ui.add_space(10.0);
+    fn render_settings_position_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Isla").strong());
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Posición:")
+                .size(12.0)
+                .color(Color32::from_gray(200)),
+        );
+        ui.horizontal_wrapped(|ui| {
+            for pos in [
+                IslandPosition::Top,
+                IslandPosition::Bottom,
+                IslandPosition::Left,
+                IslandPosition::Right,
+                IslandPosition::Custom,
+            ] {
+                if ui
+                    .radio_value(&mut self.config.island_position, pos, pos.label())
+                    .changed()
+                {
+                    self.island_sm.invalidate_geometry();
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Margen desde el borde (px):");
+            if ui
+                .add(egui::Slider::new(&mut self.config.island_margin, 0.0..=48.0).step_by(2.0))
+                .changed()
+            {
+                self.island_sm.invalidate_geometry();
+            }
+        });
+
+        ui.add_space(6.0);
         ui.separator();
+        ui.checkbox(&mut self.config.island_auto_hide, "Ocultar automáticamente");
+
+        ui.add_enabled_ui(self.config.island_auto_hide, |ui| {
+            ui.label(
+                RichText::new("Tiempo de espera:")
+                    .size(12.0)
+                    .color(Color32::from_gray(200)),
+            );
+            ui.horizontal(|ui| {
+                for (secs, label) in [(2u32, "2 segundos"), (5, "5 segundos"), (10, "10 segundos")]
+                {
+                    ui.radio_value(&mut self.config.island_hide_delay, secs, label);
+                }
+            });
+            ui.checkbox(
+                &mut self.config.island_show_on_hover,
+                "Mostrar al acercar el mouse",
+            );
+            ui.checkbox(
+                &mut self.config.island_keep_visible_during_playback,
+                "Mantener visible durante reproducción",
+            );
+            ui.checkbox(
+                &mut self.config.island_keep_visible_during_ai,
+                "Mantener visible durante operación de IA",
+            );
+        });
+
+        if self.session_kind == SessionKind::Wayland {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Nota Wayland: el compositor controla la posición absoluta en pantalla; la autoocultación colapsa la Isla a la pestaña interactiva.",
+                )
+                .size(11.0)
+                .color(Color32::from_rgb(250, 204, 21)),
+            );
+        }
+    }
+
+    fn render_settings_pet_section(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Mascota de escritorio").strong());
         ui.checkbox(&mut self.config.pet.enabled, "Habilitar Modo Mascota");
         ui.checkbox(
@@ -3059,23 +3958,6 @@ impl RustyDeskApp {
                 self.status_banner = Some("Posición de mascota restablecida.".to_string());
             }
         });
-
-        ui.add_space(10.0);
-        if pixel_button(
-            ui,
-            PixelIcon::Save,
-            "Guardar configuracion",
-            Color32::from_rgb(30, 64, 175),
-            Color32::WHITE,
-            "Guardar cambios en config.json",
-        )
-        .clicked()
-        {
-            match self.config.save() {
-                Ok(_) => self.status_banner = Some("Configuración guardada.".to_string()),
-                Err(e) => self.status_banner = Some(format!("Error al guardar: {e}")),
-            }
-        }
     }
 }
 
@@ -3213,133 +4095,5 @@ impl RustyDeskApp {
             }
         }
         ctx.input(|i| i.pointer.latest_pos())
-    }
-}
-
-fn merge_kwin_rules_list(existing: &str, rule_id: &str) -> String {
-    let mut parts: Vec<&str> = existing
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if !parts.contains(&rule_id) {
-        parts.push(rule_id);
-    }
-    parts.join(",")
-}
-
-/// On KDE Plasma Wayland, `winit`'s `WindowLevel::AlwaysOnTop` is a no-op because
-/// `xdg-shell` does not expose always-on-top to clients. Sync a KWin window rule
-/// asynchronously so KWin keeps Rusty-Desk above other windows when requested.
-fn apply_platform_always_on_top(enabled: bool) {
-    let is_wayland = std::env::var("XDG_SESSION_TYPE")
-        .map(|v| v.eq_ignore_ascii_case("wayland"))
-        .unwrap_or(false)
-        || std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let is_kde = std::env::var("XDG_CURRENT_DESKTOP")
-        .map(|v| v.to_ascii_uppercase().contains("KDE"))
-        .unwrap_or(false);
-
-    if !is_wayland || !is_kde {
-        return;
-    }
-
-    std::thread::spawn(move || {
-        use std::process::Command;
-
-        const RULE_ID: &str = "rusty-desk-always-on-top";
-        let rules_path = directories::BaseDirs::new()
-            .map(|b| b.config_dir().join("kwinrulesrc"))
-            .unwrap_or_else(|| PathBuf::from("kwinrulesrc"));
-
-        let existing_rules = std::fs::read_to_string(&rules_path)
-            .ok()
-            .and_then(|raw| {
-                raw.lines()
-                    .find_map(|line| line.strip_prefix("rules=").map(str::to_string))
-            })
-            .unwrap_or_default();
-        let merged_rules = merge_kwin_rules_list(&existing_rules, RULE_ID);
-        let above_val = if enabled { "true" } else { "false" };
-
-        let writes = [
-            ("General", "rules", merged_rules.as_str()),
-            (RULE_ID, "Description", "Rusty-Desk Always On Top"),
-            (RULE_ID, "title", "Rusty-Desk"),
-            (RULE_ID, "titlematch", "1"),
-            (RULE_ID, "above", above_val),
-            (RULE_ID, "aboverule", "2"),
-        ];
-
-        for (group, key, val) in writes {
-            let status = Command::new("kwriteconfig6")
-                .args(["--file", "kwinrulesrc", "--group", group, "--key", key, val])
-                .status();
-            if status.is_err() {
-                return;
-            }
-        }
-
-        let _ = Command::new("qdbus6")
-            .args(["org.kde.KWin", "/KWin", "reconfigure"])
-            .status();
-    });
-}
-
-fn query_x11_screen_bounds() -> Option<(f32, f32, f32, f32)> {
-    use x11rb::connection::Connection;
-    let (conn, screen_num) = x11rb::connect(None).ok()?;
-    let screen = conn.setup().roots.get(screen_num)?;
-    Some((
-        0.0,
-        0.0,
-        f32::from(screen.width_in_pixels),
-        f32::from(screen.height_in_pixels),
-    ))
-}
-
-fn spawn_global_cursor_tracker() -> Arc<Mutex<Option<(i16, i16)>>> {
-    let pos = Arc::new(Mutex::new(None));
-    let pos_clone = Arc::clone(&pos);
-    std::thread::spawn(move || {
-        use x11rb::connection::Connection;
-        use x11rb::protocol::xproto::ConnectionExt;
-
-        let Ok((conn, screen_num)) = x11rb::connect(None) else {
-            return;
-        };
-        let root = conn.setup().roots[screen_num].root;
-        loop {
-            if let Ok(cookie) = conn.query_pointer(root) {
-                if let Ok(reply) = cookie.reply() {
-                    if let Ok(mut guard) = pos_clone.lock() {
-                        *guard = Some((reply.root_x, reply.root_y));
-                    }
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(33));
-        }
-    });
-    pos
-}
-
-#[cfg(test)]
-mod tests {
-    use super::merge_kwin_rules_list;
-
-    #[test]
-    fn merge_kwin_rules_preserves_existing_and_avoids_duplicates() {
-        assert_eq!(
-            merge_kwin_rules_list("", "rusty-desk-always-on-top"),
-            "rusty-desk-always-on-top"
-        );
-        assert_eq!(
-            merge_kwin_rules_list("rule1, rule2", "rusty-desk-always-on-top"),
-            "rule1,rule2,rusty-desk-always-on-top"
-        );
-        assert_eq!(
-            merge_kwin_rules_list("rule1,rusty-desk-always-on-top", "rusty-desk-always-on-top"),
-            "rule1,rusty-desk-always-on-top"
-        );
     }
 }

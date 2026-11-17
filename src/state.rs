@@ -430,6 +430,71 @@ impl AppData {
         db.list_tracks(playlist_id)
     }
 
+    pub fn add_music_url(
+        &mut self,
+        target_playlist_id: Option<&str>,
+        title: Option<&str>,
+        url: &str,
+    ) -> anyhow::Result<(PersistedPlaylist, PersistedTrack)> {
+        let normalized_url =
+            crate::music::normalize_audio_url(url).map_err(|e| anyhow::anyhow!(e))?;
+        let track_title = title
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::music::infer_title_from_uri(&normalized_url));
+
+        let Some(db) = self.db.as_mut() else {
+            anyhow::bail!("Base de datos SQLite no disponible.");
+        };
+
+        let existing_id = target_playlist_id
+            .filter(|pid| self.playlists.iter().any(|p| p.id == *pid))
+            .map(str::to_string)
+            .or_else(|| {
+                self.playlists
+                    .iter()
+                    .find(|p| p.name == "URLs guardadas")
+                    .map(|p| p.id.clone())
+            });
+
+        if let Some(pid) = existing_id {
+            let track = db.add_track_to_playlist(&pid, &track_title, &normalized_url, None)?;
+            let mut updated_playlist = None;
+            if let Some(pl) = self.playlists.iter_mut().find(|p| p.id == pid) {
+                pl.track_count += 1;
+                updated_playlist = Some(pl.clone());
+            }
+            let playlist = updated_playlist
+                .ok_or_else(|| anyhow::anyhow!("Playlist no encontrada en memoria."))?;
+            return Ok((playlist, track));
+        }
+
+        let new_track = NewMusicTrack {
+            title: track_title,
+            uri: normalized_url,
+            duration_secs: None,
+        };
+        let playlist = db.save_playlist_with_tracks("URLs guardadas", None, &[new_track])?;
+        let tracks = db.list_tracks(&playlist.id)?;
+        let track = tracks
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No se pudo recuperar la pista guardada."))?;
+        self.playlists.insert(0, playlist.clone());
+        Ok((playlist, track))
+    }
+
+    pub fn delete_music_track(&mut self, playlist_id: &str, track_id: &str) -> anyhow::Result<()> {
+        if let Some(db) = self.db.as_ref() {
+            db.delete_track(track_id)?;
+        }
+        if let Some(pl) = self.playlists.iter_mut().find(|p| p.id == playlist_id) {
+            pl.track_count = pl.track_count.saturating_sub(1);
+        }
+        Ok(())
+    }
+
     pub fn delete_playlist(&mut self, playlist_id: &str) -> anyhow::Result<()> {
         if let Some(db) = self.db.as_ref() {
             db.delete_playlist(playlist_id)?;

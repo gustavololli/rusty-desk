@@ -667,6 +667,49 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn add_track_to_playlist(
+        &mut self,
+        playlist_id: &str,
+        title: &str,
+        uri: &str,
+        duration_secs: Option<i64>,
+    ) -> anyhow::Result<PersistedTrack> {
+        let now = Utc::now().to_rfc3339();
+        let track_id = Uuid::new_v4().to_string();
+
+        let tx = self.conn.transaction()?;
+        let next_pos: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM music_tracks WHERE playlist_id = ?1",
+            [playlist_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO music_tracks (id, playlist_id, position, title, uri, duration_secs, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![track_id, playlist_id, next_pos, title, uri, duration_secs, now],
+        )?;
+        tx.execute(
+            "UPDATE music_playlists SET updated_at = ?2 WHERE id = ?1",
+            params![playlist_id, now],
+        )?;
+        tx.commit()?;
+
+        Ok(PersistedTrack {
+            id: track_id,
+            playlist_id: playlist_id.to_string(),
+            position: next_pos.max(0) as usize,
+            title: title.to_string(),
+            uri: uri.to_string(),
+            duration_secs,
+        })
+    }
+
+    pub fn delete_track(&self, track_id: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM music_tracks WHERE id = ?1", [track_id])?;
+        Ok(())
+    }
+
     pub fn delete_playlist(&self, playlist_id: &str) -> anyhow::Result<()> {
         self.conn
             .execute("DELETE FROM music_playlists WHERE id = ?1", [playlist_id])?;
@@ -871,6 +914,15 @@ mod tests {
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].title, "Track A");
         assert_eq!(tracks[1].title, "Track B");
+
+        let added = db
+            .add_track_to_playlist(&pl.id, "Radio C", "https://example.com/live", None)
+            .unwrap();
+        assert_eq!(added.position, 2);
+        assert_eq!(db.list_tracks(&pl.id).unwrap().len(), 3);
+
+        db.delete_track(&added.id).unwrap();
+        assert_eq!(db.list_tracks(&pl.id).unwrap().len(), 2);
 
         db.delete_playlist(&pl.id).unwrap();
         assert!(db.list_playlists().unwrap().is_empty());

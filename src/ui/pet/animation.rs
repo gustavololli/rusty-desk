@@ -20,6 +20,7 @@ pub enum AnimationState {
     Error,
     Glitch,
     PomodoroFinished,
+    ListeningMusic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,10 +28,12 @@ pub enum EyeExpression {
     Normal,
     Closed,
     Happy,
-    Visor,
-    ThinkingDots(u8),
+    Wink,
+    Curious,
+    Squint,
     WideAlert,
     ErrorCross,
+    Dizzy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +54,8 @@ pub enum ParticleKind {
     Exclamation,
     Question,
     SoundPulse,
+    MusicNotes,
+    ThoughtDots,
 }
 
 /// Output of one quantized animation tick consumed by the pixel renderer.
@@ -65,9 +70,11 @@ pub struct AnimationFrame {
     pub glitch_scanline: Option<i32>,
     pub eye: EyeExpression,
     pub mouth: MouthExpression,
+    pub blush: bool,
     pub particle: ParticleKind,
     pub particle_step: u8,
     pub accent_override: Option<[u8; 3]>,
+    pub headphones: bool,
 }
 
 /// Procedural 8-bit animation state machine. Runs 100% locally with zero allocations.
@@ -83,6 +90,7 @@ pub struct AnimationController {
     next_blink_in: f32,
     look_dir_x: i32,
     rng_state: u32,
+    is_playing_music: bool,
 }
 
 impl Default for AnimationController {
@@ -98,6 +106,7 @@ impl Default for AnimationController {
             next_blink_in: 3.4,
             look_dir_x: 1,
             rng_state: 0x5A17_93E1,
+            is_playing_music: false,
         }
     }
 }
@@ -106,6 +115,16 @@ impl AnimationController {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn state(&self) -> AnimationState {
         self.state
+    }
+
+    pub fn set_music_playing(&mut self, playing: bool) {
+        if self.is_playing_music == playing {
+            return;
+        }
+        self.is_playing_music = playing;
+        if playing && self.state == AnimationState::Sleep {
+            self.transition(AnimationState::ListeningMusic, EventPriority::Low, None);
+        }
     }
 
     fn next_rand_unit(&mut self) -> f32 {
@@ -260,7 +279,13 @@ impl AnimationController {
 
         // Sync continuous mood transitions cleanly when not in transient/sleep states.
         if self.state_duration.is_none() && self.state != AnimationState::Sleep {
-            let expected = Self::base_state_for_mood(mood);
+            let expected = if self.is_playing_music && mood == AssistantMood::Idle {
+                AnimationState::ListeningMusic
+            } else if self.is_playing_music && mood == AssistantMood::Happy {
+                AnimationState::ListeningMusic
+            } else {
+                Self::base_state_for_mood(mood)
+            };
             if expected != self.state {
                 self.state = expected;
                 self.priority = EventPriority::Low;
@@ -318,9 +343,11 @@ impl AnimationController {
             glitch_scanline: None,
             eye: EyeExpression::Normal,
             mouth: MouthExpression::Neutral,
+            blush: false,
             particle: ParticleKind::None,
             particle_step: step,
             accent_override: None,
+            headphones: self.is_playing_music,
         };
 
         match self.state {
@@ -329,6 +356,7 @@ impl AnimationController {
                 frame.eye = EyeExpression::Closed;
             }
             AnimationState::LookAround => {
+                frame.eye = EyeExpression::Curious;
                 frame.look_override_x = Some(self.look_dir_x);
                 frame.look_override_y = Some(0);
             }
@@ -355,7 +383,14 @@ impl AnimationController {
                 };
             }
             AnimationState::Thinking => {
-                frame.eye = EyeExpression::ThinkingDots((self.frame_index / 2 % 3) as u8);
+                frame.eye = EyeExpression::Normal;
+                frame.look_override_x = Some(1);
+                frame.look_override_y = Some(-1);
+                frame.particle = if reduced {
+                    ParticleKind::None
+                } else {
+                    ParticleKind::ThoughtDots
+                };
             }
             AnimationState::Listening => {
                 frame.mouth = if (self.frame_index / 2).is_multiple_of(2) {
@@ -370,8 +405,14 @@ impl AnimationController {
                 };
             }
             AnimationState::Happy => {
-                frame.eye = EyeExpression::Happy;
+                frame.eye = if !reduced && self.state_duration.is_some() && self.state_elapsed < 0.45
+                {
+                    EyeExpression::Wink
+                } else {
+                    EyeExpression::Happy
+                };
                 frame.mouth = MouthExpression::Smile;
+                frame.blush = true;
                 if !reduced && expressive {
                     frame.offset_y_px = if (self.frame_index / 2).is_multiple_of(2) {
                         -1
@@ -383,6 +424,7 @@ impl AnimationController {
             AnimationState::Celebrate => {
                 frame.eye = EyeExpression::Happy;
                 frame.mouth = MouthExpression::Smile;
+                frame.blush = true;
                 frame.particle = if reduced {
                     ParticleKind::None
                 } else {
@@ -397,7 +439,7 @@ impl AnimationController {
                 frame.accent_override = Some([52, 211, 153]);
             }
             AnimationState::Focused => {
-                frame.eye = EyeExpression::Visor;
+                frame.eye = EyeExpression::Squint;
             }
             AnimationState::Error => {
                 frame.eye = EyeExpression::ErrorCross;
@@ -410,7 +452,11 @@ impl AnimationController {
                 frame.accent_override = Some([248, 113, 113]);
             }
             AnimationState::Glitch => {
-                frame.eye = EyeExpression::ErrorCross;
+                frame.eye = if reduced {
+                    EyeExpression::ErrorCross
+                } else {
+                    EyeExpression::Dizzy
+                };
                 frame.mouth = MouthExpression::Frown;
                 if !reduced {
                     frame.offset_x_px = if self.frame_index.is_multiple_of(2) {
@@ -425,6 +471,7 @@ impl AnimationController {
             AnimationState::PomodoroFinished => {
                 frame.eye = EyeExpression::Happy;
                 frame.mouth = MouthExpression::Smile;
+                frame.blush = true;
                 frame.particle = if reduced {
                     ParticleKind::None
                 } else {
@@ -438,6 +485,28 @@ impl AnimationController {
                     };
                 }
                 frame.accent_override = Some([52, 211, 153]);
+            }
+            AnimationState::ListeningMusic => {
+                frame.eye = EyeExpression::Happy;
+                frame.mouth = MouthExpression::Smile;
+                frame.blush = true;
+                frame.particle = if reduced {
+                    ParticleKind::None
+                } else {
+                    ParticleKind::MusicNotes
+                };
+                if !reduced {
+                    // Rhythmic head-bob + side-to-side groove on the beat
+                    frame.bob_px = match self.frame_index % 4 {
+                        1 | 2 => -1,
+                        _ => 0,
+                    };
+                    frame.offset_x_px = match (self.frame_index / 4) % 4 {
+                        0 => -1,
+                        2 => 1,
+                        _ => 0,
+                    };
+                }
             }
         }
 
@@ -462,6 +531,7 @@ impl AnimationController {
                     | AnimationState::Celebrate
                     | AnimationState::PomodoroFinished
                     | AnimationState::Glitch
+                    | AnimationState::ListeningMusic
             )
         {
             33

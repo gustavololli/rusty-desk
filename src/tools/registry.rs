@@ -156,6 +156,37 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
             operation: OperationKind::Conversion,
             category: "markdown",
         },
+        ToolSpec {
+            id: "add_music_url",
+            name: "add_music_url",
+            description: "Guarda una URL de música, radio o stream en la biblioteca de música (SQLite).",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL del stream o audio (http://, https://, rtsp://, file://)" },
+                    "title": { "type": "string", "description": "Nombre opcional para la pista o radio" }
+                },
+                "required": ["url"]
+            }),
+            risk: RiskLevel::LowRiskWrite,
+            operation: OperationKind::Write,
+            category: "music",
+        },
+        ToolSpec {
+            id: "get_weather",
+            name: "get_weather",
+            description: "Consulta el clima actual y temperatura de una ciudad usando Open-Meteo (gratuito).",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string", "description": "Nombre de la ciudad (ej: Buenos Aires, Córdoba, Madrid)" }
+                },
+                "required": ["city"]
+            }),
+            risk: RiskLevel::Read,
+            operation: OperationKind::Read,
+            category: "weather",
+        },
     ]
 }
 
@@ -240,6 +271,32 @@ pub fn select_tools_for_message(user_text: &str) -> Vec<ToolDef> {
     .any(|k| lower.contains(k))
     {
         categories.push("markdown");
+    }
+    if [
+        "musica", "música", "radio", "stream", "url", "cancion", "canción", "playlist",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        categories.push("music");
+    }
+    if [
+        "clima",
+        "tiempo",
+        "temperatura",
+        "lluvia",
+        "llueve",
+        "pronostico",
+        "pronóstico",
+        "weather",
+        "calor",
+        "frio",
+        "frío",
+    ]
+    .iter()
+    .any(|k| lower.contains(k))
+    {
+        categories.push("weather");
     }
 
     let specs = all_tool_specs();

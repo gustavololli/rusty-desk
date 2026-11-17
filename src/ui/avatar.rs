@@ -21,8 +21,7 @@ pub fn draw_avatar(
     } else {
         match mood {
             AssistantMood::Happy => EyeExpression::Happy,
-            AssistantMood::Focused => EyeExpression::Visor,
-            AssistantMood::Thinking => EyeExpression::ThinkingDots(((time * 6.0) as u8) % 3),
+            AssistantMood::Focused => EyeExpression::Squint,
             _ => EyeExpression::Normal,
         }
     };
@@ -37,23 +36,31 @@ pub fn draw_avatar(
         }
         _ => MouthExpression::Neutral,
     };
+    let (look_override_x, look_override_y) = if mood == AssistantMood::Thinking {
+        (Some(1), Some(-1))
+    } else {
+        (None, None)
+    };
+    let particle = match mood {
+        AssistantMood::Listening => ParticleKind::SoundPulse,
+        AssistantMood::Thinking => ParticleKind::ThoughtDots,
+        _ => ParticleKind::None,
+    };
     let frame = AnimationFrame {
         state: AnimationState::Idle,
         bob_px,
         offset_x_px: 0,
         offset_y_px: 0,
-        look_override_x: None,
-        look_override_y: None,
+        look_override_x,
+        look_override_y,
         glitch_scanline: None,
         eye,
         mouth,
-        particle: if mood == AssistantMood::Listening {
-            ParticleKind::SoundPulse
-        } else {
-            ParticleKind::None
-        },
+        blush: mood == AssistantMood::Happy,
+        particle,
         particle_step: ((time * 8.0) as u8) % 8,
         accent_override: None,
+        headphones: false,
     };
     draw_avatar_frame(ui, size, mood, time, look_target, &frame);
 }
@@ -168,7 +175,13 @@ pub fn draw_avatar_frame(
     let cy = 9 + shift_y;
 
     draw_eyes(&painter, origin, cx, cy, px_size, accent, frame.eye);
+    if frame.blush {
+        draw_blush(&painter, origin, cx, cy, px_size);
+    }
     draw_mouth(&painter, origin, cx, cy + 4, px_size, accent, frame.mouth);
+    if frame.headphones {
+        draw_headphones(&painter, origin, px_size, accent);
+    }
     draw_particles(
         &painter,
         origin,
@@ -214,41 +227,31 @@ fn draw_eyes(
                 draw_pixel(painter, origin, cx + dx + 1, cy + 1, px_size, accent);
             }
         }
-        EyeExpression::Visor => {
-            for vx in (cx - 4)..=(cx + 3) {
-                draw_pixel(painter, origin, vx, cy, px_size, accent);
-                draw_pixel(
-                    painter,
-                    origin,
-                    vx,
-                    cy + 1,
-                    px_size,
-                    Color32::from_rgb(67, 56, 202),
-                );
-            }
+        EyeExpression::Wink => {
+            // Left eye: elongated 2x3 normal eye
+            draw_elongated_eye(painter, origin, cx - 4, cy, px_size, accent, 3);
+            // Right eye: cheerful wink arch
+            draw_pixel(painter, origin, cx + 1, cy + 1, px_size, accent);
+            draw_pixel(painter, origin, cx + 2, cy, px_size, accent);
+            draw_pixel(painter, origin, cx + 3, cy + 1, px_size, accent);
         }
-        EyeExpression::ThinkingDots(step) => {
-            for (i, dx) in [-3, 0, 3].iter().enumerate() {
-                let c = if i as u8 == step {
-                    Color32::WHITE
-                } else {
-                    accent
-                };
-                draw_pixel(painter, origin, cx + dx, cy, px_size, c);
+        EyeExpression::Curious => {
+            // Asymmetrical expressive eyes (one 2x2, one 2x3)
+            draw_elongated_eye(painter, origin, cx - 4, cy, px_size, accent, 2);
+            draw_elongated_eye(painter, origin, cx + 2, cy, px_size, accent, 3);
+        }
+        EyeExpression::Squint => {
+            // Narrowed focused slits with glowing center
+            for ex in [cx - 4, cx + 1] {
+                draw_pixel(painter, origin, ex, cy, px_size, accent);
+                draw_pixel(painter, origin, ex + 1, cy, px_size, Color32::WHITE);
+                draw_pixel(painter, origin, ex + 2, cy, px_size, accent);
             }
         }
         EyeExpression::WideAlert => {
+            // Extra-tall 2x4 wide-eyed surprise
             for ex in [cx - 4, cx + 2] {
-                for dy in -1..=1 {
-                    for dx in 0..=1 {
-                        let c = if dx == 1 && dy == 0 {
-                            Color32::WHITE
-                        } else {
-                            accent
-                        };
-                        draw_pixel(painter, origin, ex + dx, cy + dy, px_size, c);
-                    }
-                }
+                draw_elongated_eye(painter, origin, ex, cy, px_size, accent, 4);
             }
         }
         EyeExpression::ErrorCross => {
@@ -259,15 +262,56 @@ fn draw_eyes(
                 draw_pixel(painter, origin, ex, cy + 1, px_size, accent);
             }
         }
-        EyeExpression::Normal => {
+        EyeExpression::Dizzy => {
             for ex in [cx - 4, cx + 2] {
-                draw_pixel(painter, origin, ex, cy, px_size, accent);
-                draw_pixel(painter, origin, ex + 1, cy, px_size, accent);
+                draw_pixel(painter, origin, ex, cy - 1, px_size, accent);
+                draw_pixel(painter, origin, ex + 1, cy, px_size, Color32::WHITE);
                 draw_pixel(painter, origin, ex, cy + 1, px_size, accent);
-                draw_pixel(painter, origin, ex + 1, cy + 1, px_size, Color32::WHITE);
+                draw_pixel(painter, origin, ex - 1, cy, px_size, accent);
+            }
+        }
+        EyeExpression::Normal => {
+            // Grokbot-style elongated 2x3 vertical eyes
+            for ex in [cx - 4, cx + 2] {
+                draw_elongated_eye(painter, origin, ex, cy, px_size, accent, 3);
             }
         }
     }
+}
+
+/// Draws a 2px-wide vertical elongated eye of `height` (2, 3, or 4 px) with a top-right glint.
+fn draw_elongated_eye(
+    painter: &egui::Painter,
+    origin: Pos2,
+    ex: i32,
+    cy: i32,
+    px_size: f32,
+    accent: Color32,
+    height: i32,
+) {
+    let (y_start, y_end) = match height {
+        2 => (cy, cy + 1),
+        4 => (cy - 1, cy + 2),
+        _ => (cy - 1, cy + 1),
+    };
+    for gy in y_start..=y_end {
+        for dx in 0..=1 {
+            let c = if dx == 1 && gy == y_start {
+                Color32::WHITE
+            } else {
+                accent
+            };
+            draw_pixel(painter, origin, ex + dx, gy, px_size, c);
+        }
+    }
+}
+
+fn draw_blush(painter: &egui::Painter, origin: Pos2, cx: i32, cy: i32, px_size: f32) {
+    let pink = Color32::from_rgba_unmultiplied(244, 114, 182, 180);
+    draw_pixel(painter, origin, cx - 5, cy + 2, px_size, pink);
+    draw_pixel(painter, origin, cx - 4, cy + 2, px_size, pink);
+    draw_pixel(painter, origin, cx + 3, cy + 2, px_size, pink);
+    draw_pixel(painter, origin, cx + 4, cy + 2, px_size, pink);
 }
 
 fn draw_mouth(
@@ -328,7 +372,32 @@ fn draw_particles(
     step: u8,
 ) {
     match particle {
-        ParticleKind::None | ParticleKind::SoundPulse => {}
+        ParticleKind::None => {}
+        ParticleKind::SoundPulse => {
+            // Side equalizer bars inspired by voice/listening indicators
+            let half_h = match step % 4 {
+                0 => 1,
+                1 => 2,
+                2 => 3,
+                _ => 2,
+            };
+            for dy in -half_h..=half_h {
+                draw_pixel(painter, origin, 0, 9 + dy, px_size, accent);
+                draw_pixel(painter, origin, 19, 9 + dy, px_size, accent);
+            }
+        }
+        ParticleKind::ThoughtDots => {
+            let active = (step / 2) % 3;
+            draw_pixel(painter, origin, 13, 3, px_size, accent);
+            for (i, gx) in [15, 17, 19].iter().enumerate() {
+                let c = if i as u8 == active {
+                    Color32::WHITE
+                } else {
+                    accent
+                };
+                draw_pixel(painter, origin, *gx, 1, px_size, c);
+            }
+        }
         ParticleKind::Sparkles => {
             let gold = Color32::from_rgb(250, 204, 21);
             let coords = match step % 4 {
@@ -368,6 +437,64 @@ fn draw_particles(
             draw_pixel(painter, origin, 17, 2, px_size, c);
             draw_pixel(painter, origin, 16, 4, px_size, c);
         }
+        ParticleKind::MusicNotes => {
+            let note_a = Color32::from_rgb(52, 211, 153);
+            let note_b = Color32::from_rgb(250, 204, 21);
+            let dy_a = ((step / 2) % 2) as i32;
+            let dy_b = (((step / 2) + 1) % 2) as i32;
+
+            // Right-side eighth note ♪
+            draw_pixel(painter, origin, 17, 1 - dy_a, px_size, note_a);
+            draw_pixel(painter, origin, 18, 1 - dy_a, px_size, note_a);
+            draw_pixel(painter, origin, 17, 2 - dy_a, px_size, note_a);
+            draw_pixel(painter, origin, 17, 3 - dy_a, px_size, note_a);
+            draw_pixel(painter, origin, 16, 4 - dy_a, px_size, note_a);
+            draw_pixel(painter, origin, 17, 4 - dy_a, px_size, note_a);
+
+            // Left-side small note
+            draw_pixel(painter, origin, 2, 2 - dy_b, px_size, note_b);
+            draw_pixel(painter, origin, 3, 2 - dy_b, px_size, note_b);
+            draw_pixel(painter, origin, 2, 3 - dy_b, px_size, note_b);
+            draw_pixel(painter, origin, 1, 4 - dy_b, px_size, note_b);
+            draw_pixel(painter, origin, 2, 4 - dy_b, px_size, note_b);
+        }
+    }
+}
+
+fn draw_headphones(painter: &egui::Painter, origin: Pos2, px_size: f32, accent: Color32) {
+    let band = Color32::from_rgb(71, 85, 105);
+    let band_hi = Color32::from_rgb(148, 163, 184);
+    let cup_outer = Color32::from_rgb(30, 41, 59);
+    let cup_pad = Color32::from_rgb(51, 65, 85);
+
+    // Top headband arc
+    for gx in 5..=14 {
+        let c = if (7..=12).contains(&gx) {
+            band_hi
+        } else {
+            band
+        };
+        draw_pixel(painter, origin, gx, 0, px_size, c);
+    }
+    draw_pixel(painter, origin, 4, 1, px_size, band);
+    draw_pixel(painter, origin, 15, 1, px_size, band);
+    draw_pixel(painter, origin, 3, 2, px_size, band);
+    draw_pixel(painter, origin, 16, 2, px_size, band);
+    for gy in 3..=6 {
+        draw_pixel(painter, origin, 2, gy, px_size, band);
+        draw_pixel(painter, origin, 17, gy, px_size, band);
+    }
+
+    // Left and right earcups with accent LED stripe
+    for gy in 7..=12 {
+        draw_pixel(painter, origin, 1, gy, px_size, cup_outer);
+        draw_pixel(painter, origin, 2, gy, px_size, cup_pad);
+        draw_pixel(painter, origin, 18, gy, px_size, cup_outer);
+        draw_pixel(painter, origin, 17, gy, px_size, cup_pad);
+    }
+    for gy in 8..=11 {
+        draw_pixel(painter, origin, 0, gy, px_size, accent);
+        draw_pixel(painter, origin, 19, gy, px_size, accent);
     }
 }
 

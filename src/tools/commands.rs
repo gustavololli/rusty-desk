@@ -3,6 +3,9 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocalCommand {
     Tool { name: &'static str, args: Value },
+    PlayMusic(Option<String>),
+    StopMusic,
+    Weather(Option<String>),
     Help(String),
     Invalid(String),
 }
@@ -17,6 +20,10 @@ const HELP_TEXT: &str = "Comandos locales (sin gastar tokens de IA):
 - `/pausa` — Pausa o reanuda Pomodoro
 - `/ordenar [preview|aplicar|deshacer]` — Organiza el escritorio
 - `/md <ruta>` — Convierte un archivo a Markdown local
+- `/musica <url> [nombre]` — Guarda una URL de música/radio en SQLite
+- `/play [nombre|número]` — Reproduce una pista o URL guardada
+- `/stop` — Detiene la reproducción de música
+- `/clima [ciudad]` — Consulta el clima actual (Open-Meteo, gratis)
 - `/ayuda` — Muestra esta ayuda";
 
 /// Parses explicit `/` slash commands so deterministic operations bypass the LLM completely.
@@ -126,6 +133,32 @@ pub fn parse_local_command(input: &str) -> Option<LocalCommand> {
                     args: json!({ "path": rest, "save_file": true, "compact": "moderate" }),
                 }
             }
+        }
+        "/musica" | "/music" | "/url" => {
+            if rest.is_empty() {
+                LocalCommand::Invalid("Uso: `/musica <url> [nombre opcional]`".to_string())
+            } else {
+                let mut url_parts = rest.splitn(2, char::is_whitespace);
+                let url = url_parts.next().unwrap_or("").trim();
+                let title = url_parts.next().map(str::trim).filter(|t| !t.is_empty());
+                let args = match title {
+                    Some(t) => json!({ "url": url, "title": t }),
+                    None => json!({ "url": url }),
+                };
+                LocalCommand::Tool {
+                    name: "add_music_url",
+                    args,
+                }
+            }
+        }
+        "/play" | "/reproducir" => {
+            let query = (!rest.is_empty()).then(|| rest.to_string());
+            LocalCommand::PlayMusic(query)
+        }
+        "/stop" | "/detener" => LocalCommand::StopMusic,
+        "/clima" | "/weather" => {
+            let city = (!rest.is_empty()).then(|| rest.to_string());
+            LocalCommand::Weather(city)
         }
         _ => LocalCommand::Invalid(format!(
             "Comando desconocido `{cmd}`. Escribí `/ayuda` para ver los comandos locales."

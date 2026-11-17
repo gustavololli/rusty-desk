@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M3uTrack {
@@ -58,12 +59,26 @@ pub fn parse_m3u_content(content: &str, base_dir: Option<&Path>) -> Vec<M3uTrack
     tracks
 }
 
-fn is_remote_or_uri(s: &str) -> bool {
+pub fn is_remote_or_uri(s: &str) -> bool {
     let lower = s.to_ascii_lowercase();
     lower.starts_with("http://")
         || lower.starts_with("https://")
         || lower.starts_with("rtsp://")
         || lower.starts_with("file://")
+}
+
+pub fn normalize_audio_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Ingresá una URL válida.".to_string());
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err("La URL no puede contener espacios.".to_string());
+    }
+    if !is_remote_or_uri(trimmed) {
+        return Err("La URL debe comenzar con http://, https://, rtsp:// o file://".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn resolve_track_uri(entry: &str, base_dir: Option<&Path>) -> String {
@@ -82,7 +97,7 @@ fn resolve_track_uri(entry: &str, base_dir: Option<&Path>) -> String {
     }
 }
 
-fn infer_title_from_uri(uri: &str) -> String {
+pub fn infer_title_from_uri(uri: &str) -> String {
     if is_remote_or_uri(uri) {
         return uri
             .rsplit('/')
@@ -154,20 +169,137 @@ pub fn pick_m3u_file_dialog() -> Result<Option<PathBuf>, String> {
     Err("No se encontró kdialog ni zenity para abrir el selector de archivos.".to_string())
 }
 
-/// Lightweight local audio player backed by `ffplay` (with fallbacks to `mpg123` / `gst-play-1.0`).
+/// Abstraction for applying live volume and mute state to an active player process.
+pub trait VolumeBackend: Send + Sync {
+    fn apply_pid_volume(&self, pid: u32, volume_pct: u8, muted: bool) -> bool;
+}
+
+/// PulseAudio / PipeWire `pactl` backend that adjusts only rusty-desk's sink-input.
+#[derive(Debug, Default)]
+pub struct PactlVolumeBackend;
+
+impl VolumeBackend for PactlVolumeBackend {
+    fn apply_pid_volume(&self, pid: u32, volume_pct: u8, muted: bool) -> bool {
+        let Ok(out) = Command::new("pactl").args(["list", "sink-inputs"]).output() else {
+            return false;
+        };
+        if !out.status.success() {
+            return false;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut ids = parse_sink_input_ids_for_pid(&text, pid);
+        if ids.is_empty() {
+            if let Ok(clients_out) = Command::new("pactl").args(["list", "clients"]).output() {
+                if clients_out.status.success() {
+                    let clients_text = String::from_utf8_lossy(&clients_out.stdout);
+                    let client_ids = parse_client_ids_for_pid(&clients_text, pid);
+                    if !client_ids.is_empty() {
+                        ids = parse_sink_input_ids_for_clients(&text, &client_ids);
+                    }
+                }
+            }
+        }
+        if ids.is_empty() {
+            return false;
+        }
+
+        let vol_arg = format!("{}%", volume_pct.min(100));
+        let mute_arg = if muted { "1" } else { "0" };
+        let mut applied_any = false;
+        for id in &ids {
+            let vol_ok = Command::new("pactl")
+                .args(["set-sink-input-volume", id, &vol_arg])
+                .status()
+                .is_ok_and(|s| s.success());
+            let mute_ok = Command::new("pactl")
+                .args(["set-sink-input-mute", id, mute_arg])
+                .status()
+                .is_ok_and(|s| s.success());
+            applied_any |= vol_ok && mute_ok;
+        }
+        applied_any
+    }
+}
+
+/// Parses `pactl list` block output and returns all block IDs whose `field_prefix` matches `predicate`.
+fn parse_block_ids_matching(
+    text: &str,
+    header_prefix: &str,
+    field_prefix: &str,
+    mut predicate: impl FnMut(&str) -> bool,
+) -> Vec<String> {
+    let mut current_id: Option<String> = None;
+    let mut matches = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(header_prefix) {
+            current_id = Some(rest.trim().to_string());
+        } else if let Some(val) = trimmed.strip_prefix(field_prefix) {
+            if predicate(val.trim()) {
+                if let Some(id) = current_id.take() {
+                    matches.push(id);
+                }
+            }
+        }
+    }
+    matches
+}
+
+/// Parses `pactl list sink-inputs` output and returns the first sink-input ID matching `pid`.
+#[allow(dead_code)]
+pub fn parse_sink_input_id_for_pid(text: &str, pid: u32) -> Option<String> {
+    parse_sink_input_ids_for_pid(text, pid).into_iter().next()
+}
+
+/// Parses `pactl list sink-inputs` output and returns all sink-input IDs matching `pid`.
+pub fn parse_sink_input_ids_for_pid(text: &str, pid: u32) -> Vec<String> {
+    let exact_pid = format!("\"{pid}\"");
+    parse_block_ids_matching(text, "Sink Input #", "application.process.id =", |v| {
+        v == exact_pid
+    })
+}
+
+/// Parses `pactl list clients` output and returns all client IDs belonging to `pid`.
+///
+/// Native PipeWire clients (e.g. `ffplay` via SDL's PipeWire backend) expose
+/// `application.process.id` on the client object rather than on the sink-input node.
+pub fn parse_client_ids_for_pid(clients_text: &str, pid: u32) -> Vec<String> {
+    let exact_pid = format!("\"{pid}\"");
+    parse_block_ids_matching(clients_text, "Client #", "application.process.id =", |v| {
+        v == exact_pid
+    })
+}
+
+/// Parses `pactl list sink-inputs` output and returns all sink-input IDs owned by `client_ids`.
+pub fn parse_sink_input_ids_for_clients(sink_inputs_text: &str, client_ids: &[String]) -> Vec<String> {
+    parse_block_ids_matching(sink_inputs_text, "Sink Input #", "Client:", |v| {
+        client_ids.iter().any(|c| c == v)
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VolumeTarget {
+    pid: u32,
+    volume: u8,
+    muted: bool,
+    retries_left: u8,
+    gen: u64,
+}
+
+/// Lightweight local audio player backed by `ffplay` (with fallbacks to `gst-play-1.0` / `mpg123`).
 pub struct MusicPlayer {
     child: Option<Child>,
     volume: u8,
-    last_live_vol_pid: Option<u32>,
+    muted: bool,
+    paused: bool,
+    gen: u64,
+    worker_state: Arc<(Mutex<Option<VolumeTarget>>, Condvar)>,
 }
 
 impl Default for MusicPlayer {
     fn default() -> Self {
-        Self {
-            child: None,
-            volume: 80,
-            last_live_vol_pid: None,
-        }
+        Self::with_backend(Arc::new(PactlVolumeBackend))
     }
 }
 
@@ -178,17 +310,101 @@ impl Drop for MusicPlayer {
 }
 
 impl MusicPlayer {
-    pub fn is_playing(&mut self) -> bool {
+    pub fn with_backend(backend: Arc<dyn VolumeBackend>) -> Self {
+        let worker_state: Arc<(Mutex<Option<VolumeTarget>>, Condvar)> =
+            Arc::new((Mutex::new(None), Condvar::new()));
+        let state_clone = Arc::clone(&worker_state);
+
+        std::thread::spawn(move || {
+            let mut last_applied_gen: Option<u64> = None;
+            loop {
+                let target_opt = {
+                    let (lock, cvar) = &*state_clone;
+                    let mut guard = match lock.lock() {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                    while guard.is_none()
+                        || guard
+                            .as_ref()
+                            .is_some_and(|t| last_applied_gen == Some(t.gen) && t.retries_left == 0)
+                    {
+                        guard = match cvar.wait(guard) {
+                            Ok(g) => g,
+                            Err(_) => return,
+                        };
+                    }
+                    *guard
+                };
+
+                let Some(target) = target_opt else {
+                    continue;
+                };
+
+                let applied = backend.apply_pid_volume(target.pid, target.volume, target.muted);
+                let mut should_sleep = false;
+                if let Ok(mut guard) = state_clone.0.lock() {
+                    if let Some(current) = guard.as_mut() {
+                        if current.gen == target.gen {
+                            last_applied_gen = Some(target.gen);
+                            if applied {
+                                current.retries_left = 0;
+                            } else if current.retries_left > 0 {
+                                current.retries_left -= 1;
+                                should_sleep = true;
+                            }
+                        }
+                    }
+                }
+                if should_sleep {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        });
+
+        Self {
+            child: None,
+            volume: 80,
+            muted: false,
+            paused: false,
+            gen: 0,
+            worker_state,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn volume(&self) -> u8 {
+        self.volume
+    }
+
+    #[allow(dead_code)]
+    pub fn is_muted(&self) -> bool {
+        self.muted
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Returns `true` if a track is loaded (playing OR paused).
+    pub fn is_active(&mut self) -> bool {
         let Some(child) = self.child.as_mut() else {
+            self.paused = false;
             return false;
         };
         match child.try_wait() {
             Ok(None) => true,
             _ => {
                 self.child = None;
+                self.paused = false;
                 false
             }
         }
+    }
+
+    /// Returns `true` only when actively playing (not paused).
+    pub fn is_playing(&mut self) -> bool {
+        self.is_active() && !self.paused
     }
 
     /// Returns `true` once if the active track finished playing on its own.
@@ -199,13 +415,15 @@ impl MusicPlayer {
         match child.try_wait() {
             Ok(Some(_)) => {
                 self.child = None;
-                self.last_live_vol_pid = None;
+                self.paused = false;
+                self.clear_worker_target();
                 true
             }
             Ok(None) => false,
             Err(_) => {
                 self.child = None;
-                self.last_live_vol_pid = None;
+                self.paused = false;
+                self.clear_worker_target();
                 false
             }
         }
@@ -213,8 +431,9 @@ impl MusicPlayer {
 
     pub fn play(&mut self, uri: &str) -> Result<(), String> {
         self.stop();
-        let vol_str = self.volume.min(100).to_string();
+        self.paused = false;
 
+        // Spawn at 100% internal gain so `pactl` can scale smoothly across 0..=100% and mute/unmute.
         if let Ok(child) = Command::new("ffplay")
             .args([
                 "-nodisp",
@@ -222,7 +441,7 @@ impl MusicPlayer {
                 "-loglevel",
                 "quiet",
                 "-volume",
-                &vol_str,
+                "100",
                 uri,
             ])
             .stdin(Stdio::null())
@@ -230,25 +449,22 @@ impl MusicPlayer {
             .stderr(Stdio::null())
             .spawn()
         {
-            self.last_live_vol_pid = Some(child.id());
+            let pid = child.id();
             self.child = Some(child);
+            self.push_worker_target(pid, 40);
             return Ok(());
         }
 
         if let Ok(child) = Command::new("gst-play-1.0")
-            .args([
-                "--quiet",
-                "--volume",
-                &format!("{:.2}", f32::from(self.volume) / 100.0),
-                uri,
-            ])
+            .args(["--quiet", "--volume", "1.00", uri])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
         {
-            self.last_live_vol_pid = Some(child.id());
+            let pid = child.id();
             self.child = Some(child);
+            self.push_worker_target(pid, 40);
             return Ok(());
         }
 
@@ -259,20 +475,60 @@ impl MusicPlayer {
             .stderr(Stdio::null())
             .spawn()
         {
-            self.last_live_vol_pid = Some(child.id());
+            let pid = child.id();
             self.child = Some(child);
+            self.push_worker_target(pid, 40);
             return Ok(());
         }
 
         Err("No se encontró un reproductor compatible (ffplay, gst-play-1.0 o mpg123).".to_string())
     }
 
+    pub fn pause(&mut self) {
+        if self.paused {
+            return;
+        }
+        if let Some(pid) = self.child.as_ref().map(Child::id) {
+            let _ = Command::new("kill")
+                .args(["-STOP", &pid.to_string()])
+                .status();
+            self.paused = true;
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if !self.paused {
+            return;
+        }
+        if let Some(pid) = self.child.as_ref().map(Child::id) {
+            let _ = Command::new("kill")
+                .args(["-CONT", &pid.to_string()])
+                .status();
+            self.paused = false;
+            self.push_worker_target(pid, 4);
+        }
+    }
+
+    pub fn toggle_pause(&mut self) {
+        if self.paused {
+            self.resume();
+        } else {
+            self.pause();
+        }
+    }
+
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
+            if self.paused {
+                let _ = Command::new("kill")
+                    .args(["-CONT", &child.id().to_string()])
+                    .status();
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
-        self.last_live_vol_pid = None;
+        self.paused = false;
+        self.clear_worker_target();
     }
 
     pub fn set_volume(&mut self, new_volume: u8) {
@@ -282,36 +538,47 @@ impl MusicPlayer {
         }
         self.volume = clamped;
         if let Some(pid) = self.child.as_ref().map(Child::id) {
-            std::thread::spawn(move || {
-                apply_pactl_volume_for_pid(pid, clamped);
-            });
+            self.push_worker_target(pid, 4);
         }
     }
-}
 
-/// Best-effort live volume adjustment on PipeWire/PulseAudio without restarting playback.
-fn apply_pactl_volume_for_pid(pid: u32, volume_pct: u8) {
-    let Ok(out) = Command::new("pactl").args(["list", "sink-inputs"]).output() else {
-        return;
-    };
-    if !out.status.success() {
-        return;
+    pub fn set_muted(&mut self, muted: bool) {
+        if self.muted == muted {
+            return;
+        }
+        self.muted = muted;
+        if let Some(pid) = self.child.as_ref().map(Child::id) {
+            self.push_worker_target(pid, 4);
+        }
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let pid_str = pid.to_string();
-    let mut current_id: Option<String> = None;
 
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("Sink Input #") {
-            current_id = Some(rest.trim().to_string());
-        } else if trimmed.starts_with("application.process.id =") && trimmed.contains(&pid_str) {
-            if let Some(id) = current_id.take() {
-                let _ = Command::new("pactl")
-                    .args(["set-sink-input-volume", &id, &format!("{volume_pct}%")])
-                    .status();
-                break;
-            }
+    pub fn toggle_mute(&mut self) -> bool {
+        let next = !self.muted;
+        self.set_muted(next);
+        next
+    }
+
+    fn push_worker_target(&mut self, pid: u32, retries_left: u8) {
+        self.gen = self.gen.wrapping_add(1);
+        let target = VolumeTarget {
+            pid,
+            volume: self.volume,
+            muted: self.muted,
+            retries_left,
+            gen: self.gen,
+        };
+        let (lock, cvar) = &*self.worker_state;
+        if let Ok(mut guard) = lock.lock() {
+            *guard = Some(target);
+            cvar.notify_all();
+        }
+    }
+
+    fn clear_worker_target(&self) {
+        let (lock, cvar) = &*self.worker_state;
+        if let Ok(mut guard) = lock.lock() {
+            *guard = None;
+            cvar.notify_all();
         }
     }
 }
@@ -343,5 +610,149 @@ https://example.com/live.mp3
 
         assert_eq!(tracks[2].title, "song2");
         assert_eq!(tracks[2].uri, "/abs/path/song2.flac");
+    }
+
+    #[test]
+    fn normalizes_and_validates_audio_urls() {
+        assert_eq!(
+            normalize_audio_url("  https://radio.example.com/live.mp3  ").unwrap(),
+            "https://radio.example.com/live.mp3"
+        );
+        assert_eq!(
+            normalize_audio_url("http://stream.local:8000/radio").unwrap(),
+            "http://stream.local:8000/radio"
+        );
+        assert!(normalize_audio_url("").is_err());
+        assert!(normalize_audio_url("https://bad url.com/a.mp3").is_err());
+        assert!(normalize_audio_url("/local/file.mp3").is_err());
+    }
+
+    #[test]
+    fn parses_exact_sink_input_pid_without_prefix_collisions() {
+        let pactl_out = "\
+Sink Input #41
+\tDriver: PipeWire
+\tapplication.process.id = \"1234\"
+Sink Input #42
+\tDriver: PipeWire
+\tapplication.process.id = \"123\"
+";
+        assert_eq!(
+            parse_sink_input_id_for_pid(pactl_out, 123).as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            parse_sink_input_id_for_pid(pactl_out, 1234).as_deref(),
+            Some("41")
+        );
+        assert_eq!(parse_sink_input_id_for_pid(pactl_out, 999), None);
+    }
+
+    #[test]
+    fn resolves_pipewire_sink_input_via_client_pid_when_node_lacks_process_id() {
+        let sink_inputs = "\
+Sink Input #113
+\tDriver: PipeWire
+\tClient: 112
+\tProperties:
+\t\tapplication.name = \"ffplay\"
+Sink Input #176
+\tDriver: PipeWire
+\tClient: 175
+\tProperties:
+\t\tapplication.name = \"ffplay\"
+";
+        let clients = "\
+Client #174
+\tProperties:
+\t\tapplication.name = \"ffplay\"
+\t\tapplication.process.id = \"3659\"
+Client #175
+\tProperties:
+\t\tapplication.name = \"ffplay\"
+\t\tapplication.process.id = \"3659\"
+Client #112
+\tProperties:
+\t\tapplication.name = \"ffplay\"
+\t\tapplication.process.id = \"2151\"
+";
+        assert!(parse_sink_input_ids_for_pid(sink_inputs, 3659).is_empty());
+        let client_ids = parse_client_ids_for_pid(clients, 3659);
+        assert_eq!(client_ids, vec!["174", "175"]);
+        assert_eq!(
+            parse_sink_input_ids_for_clients(sink_inputs, &client_ids),
+            vec!["176"]
+        );
+        // Prefix collisions on PID must not match, and empty client list yields no sink-inputs.
+        assert!(parse_client_ids_for_pid(clients, 365).is_empty());
+        assert!(parse_sink_input_ids_for_clients(sink_inputs, &[]).is_empty());
+    }
+
+    struct RecordingVolumeBackend {
+        calls: Mutex<Vec<(u32, u8, bool)>>,
+    }
+
+    impl RecordingVolumeBackend {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl VolumeBackend for RecordingVolumeBackend {
+        fn apply_pid_volume(&self, pid: u32, volume_pct: u8, muted: bool) -> bool {
+            if let Ok(mut guard) = self.calls.lock() {
+                guard.push((pid, volume_pct, muted));
+            }
+            true
+        }
+    }
+
+    #[test]
+    fn slider_volume_and_mute_reach_audio_backend_and_preserve_previous_volume() {
+        let backend = Arc::new(RecordingVolumeBackend::new());
+        let mut player = MusicPlayer::with_backend(backend.clone());
+
+        // Spawn a lightweight silent sleeper process as a stand-in child PID.
+        let child = Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .expect("sleep should spawn");
+        let pid = child.id();
+        player.child = Some(child);
+
+        for target_vol in [0u8, 25, 50, 100, 65] {
+            player.set_volume(target_vol);
+            assert_eq!(player.volume(), target_vol);
+        }
+
+        // Mute keeps previous volume and sends muted=true.
+        player.set_muted(true);
+        assert!(player.is_muted());
+        assert_eq!(player.volume(), 65);
+
+        // Unmute restores previous volume and sends muted=false.
+        player.set_muted(false);
+        assert!(!player.is_muted());
+        assert_eq!(player.volume(), 65);
+
+        // Pause / resume does not reset volume or mute.
+        player.pause();
+        assert!(player.is_paused());
+        player.resume();
+        assert!(!player.is_paused());
+        assert_eq!(player.volume(), 65);
+
+        // Wait briefly for worker thread to flush.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        player.stop();
+
+        let calls = backend.calls.lock().unwrap();
+        assert!(
+            !calls.is_empty(),
+            "volume backend must receive updates from slider/mute"
+        );
+        assert!(calls.iter().any(|&(p, v, m)| p == pid && v == 65 && !m));
     }
 }
