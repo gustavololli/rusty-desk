@@ -75,6 +75,8 @@ pub struct AnimationFrame {
     pub particle_step: u8,
     pub accent_override: Option<[u8; 3]>,
     pub headphones: bool,
+    /// Milliseconds already spent in `state`. The sprite renderer picks a frame from this.
+    pub elapsed_ms: u32,
 }
 
 /// Procedural 8-bit animation state machine. Runs 100% locally with zero allocations.
@@ -279,9 +281,9 @@ impl AnimationController {
 
         // Sync continuous mood transitions cleanly when not in transient/sleep states.
         if self.state_duration.is_none() && self.state != AnimationState::Sleep {
-            let expected = if self.is_playing_music && mood == AssistantMood::Idle {
-                AnimationState::ListeningMusic
-            } else if self.is_playing_music && mood == AssistantMood::Happy {
+            let expected = if self.is_playing_music
+                && matches!(mood, AssistantMood::Idle | AssistantMood::Happy)
+            {
                 AnimationState::ListeningMusic
             } else {
                 Self::base_state_for_mood(mood)
@@ -314,7 +316,9 @@ impl AnimationController {
                 self.blink_timer = 0.0;
                 self.next_blink_in = 2.6 + self.next_rand_unit() * 3.8;
                 if self.state == AnimationState::Idle {
-                    self.transition(AnimationState::Blink, EventPriority::Low, Some(0.16));
+                    // One 4-frame cycle at the sprite sheet's 8 FPS, so the eyes
+                    // close and open instead of ending before the closed frames.
+                    self.transition(AnimationState::Blink, EventPriority::Low, Some(0.50));
                 }
             }
         }
@@ -348,6 +352,7 @@ impl AnimationController {
             particle_step: step,
             accent_override: None,
             headphones: self.is_playing_music,
+            elapsed_ms: (self.state_elapsed.max(0.0) * 1000.0) as u32,
         };
 
         match self.state {
@@ -513,32 +518,72 @@ impl AnimationController {
         frame
     }
 
-    /// Adaptive repaint interval to minimize CPU/GPU usage when calm or sleeping.
-    pub fn recommended_repaint_ms(&self, is_hovered: bool, config: &PetConfig) -> u64 {
-        if config.reduce_animations {
-            return if self.state_duration.is_some() {
-                66
-            } else {
-                250
-            };
-        }
-        if is_hovered
-            || self.state_duration.is_some()
-            || matches!(
-                self.state,
-                AnimationState::Thinking
-                    | AnimationState::Listening
-                    | AnimationState::Celebrate
-                    | AnimationState::PomodoroFinished
-                    | AnimationState::Glitch
-                    | AnimationState::ListeningMusic
-            )
-        {
-            33
-        } else if self.state == AnimationState::Sleep {
-            220
+    /// Repaint cadence for the 8 FPS sprite sheet.
+    ///
+    /// Steady reduced-motion states do not cycle frames, so they wait longer.
+    /// Pointer motion still repaints immediately through egui.
+    pub fn recommended_repaint_ms(&self, _is_hovered: bool, config: &PetConfig) -> u64 {
+        if config.reduce_animations && self.state_duration.is_none() {
+            400
         } else {
-            90
+            125
+        }
+    }
+}
+
+impl AnimationState {
+    pub const ALL: [Self; 14] = [
+        Self::Idle,
+        Self::Blink,
+        Self::LookAround,
+        Self::Sleep,
+        Self::WakeUp,
+        Self::Thinking,
+        Self::Listening,
+        Self::Happy,
+        Self::Celebrate,
+        Self::Focused,
+        Self::Error,
+        Self::Glitch,
+        Self::PomodoroFinished,
+        Self::ListeningMusic,
+    ];
+
+    pub const fn manifest_key(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Blink => "Blink",
+            Self::LookAround => "LookAround",
+            Self::Sleep => "Sleep",
+            Self::WakeUp => "WakeUp",
+            Self::Thinking => "Thinking",
+            Self::Listening => "Listening",
+            Self::Happy => "Happy",
+            Self::Celebrate => "Celebrate",
+            Self::Focused => "Focused",
+            Self::Error => "Error",
+            Self::Glitch => "Glitch",
+            Self::PomodoroFinished => "PomodoroFinished",
+            Self::ListeningMusic => "ListeningMusic",
+        }
+    }
+
+    pub const fn folder(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Blink => "blink",
+            Self::LookAround => "look_around",
+            Self::Sleep => "sleep",
+            Self::WakeUp => "wake_up",
+            Self::Thinking => "thinking",
+            Self::Listening => "listening",
+            Self::Happy => "happy",
+            Self::Celebrate => "celebrate",
+            Self::Focused => "focused",
+            Self::Error => "error",
+            Self::Glitch => "glitch",
+            Self::PomodoroFinished => "pomodoro_finished",
+            Self::ListeningMusic => "listening_music",
         }
     }
 }

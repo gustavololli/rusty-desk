@@ -4300,6 +4300,7 @@ dependencies = [
  "eframe",
  "hound",
  "markitdown",
+ "png",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

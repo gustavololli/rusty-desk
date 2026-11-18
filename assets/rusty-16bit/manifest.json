@@ -1,0 +1,153 @@
+{
+  "name": "Rusty 16-bit yellow robot",
+  "version": 1,
+  "frame_width": 96,
+  "frame_height": 96,
+  "fps": 8,
+  "columns": 4,
+  "rows": 14,
+  "sheet": "rusty-spritesheet.png",
+  "format": "RGBA PNG, nearest-neighbor, transparent background",
+  "states": {
+    "Idle": {
+      "row": 0,
+      "frames": [
+        "frames/idle/00.png",
+        "frames/idle/01.png",
+        "frames/idle/02.png",
+        "frames/idle/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "Blink": {
+      "row": 1,
+      "frames": [
+        "frames/blink/00.png",
+        "frames/blink/01.png",
+        "frames/blink/02.png",
+        "frames/blink/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "LookAround": {
+      "row": 2,
+      "frames": [
+        "frames/look_around/00.png",
+        "frames/look_around/01.png",
+        "frames/look_around/02.png",
+        "frames/look_around/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "Sleep": {
+      "row": 3,
+      "frames": [
+        "frames/sleep/00.png",
+        "frames/sleep/01.png",
+        "frames/sleep/02.png",
+        "frames/sleep/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "WakeUp": {
+      "row": 4,
+      "frames": [
+        "frames/wake_up/00.png",
+        "frames/wake_up/01.png",
+        "frames/wake_up/02.png",
+        "frames/wake_up/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "Thinking": {
+      "row": 5,
+      "frames": [
+        "frames/thinking/00.png",
+        "frames/thinking/01.png",
+        "frames/thinking/02.png",
+        "frames/thinking/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "Listening": {
+      "row": 6,
+      "frames": [
+        "frames/listening/00.png",
+        "frames/listening/01.png",
+        "frames/listening/02.png",
+        "frames/listening/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "Happy": {
+      "row": 7,
+      "frames": [
+        "frames/happy/00.png",
+        "frames/happy/01.png",
+        "frames/happy/02.png",
+        "frames/happy/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "Celebrate": {
+      "row": 8,
+      "frames": [
+        "frames/celebrate/00.png",
+        "frames/celebrate/01.png",
+        "frames/celebrate/02.png",
+        "frames/celebrate/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "Focused": {
+      "row": 9,
+      "frames": [
+        "frames/focused/00.png",
+        "frames/focused/01.png",
+        "frames/focused/02.png",
+        "frames/focused/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "Error": {
+      "row": 10,
+      "frames": [
+        "frames/error/00.png",
+        "frames/error/01.png",
+        "frames/error/02.png",
+        "frames/error/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "Glitch": {
+      "row": 11,
+      "frames": [
+        "frames/glitch/00.png",
+        "frames/glitch/01.png",
+        "frames/glitch/02.png",
+        "frames/glitch/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "PomodoroFinished": {
+      "row": 12,
+      "frames": [
+        "frames/pomodoro_finished/00.png",
+        "frames/pomodoro_finished/01.png",
+        "frames/pomodoro_finished/02.png",
+        "frames/pomodoro_finished/03.png"
+      ],
+      "frame_duration_ms": 125
+    },
+    "ListeningMusic": {
+      "row": 13,
+      "frames": [
+        "frames/listening_music/00.png",
+        "frames/listening_music/01.png",
+        "frames/listening_music/02.png",
+        "frames/listening_music/03.png"
+      ],
+      "frame_duration_ms": 125
+    }
+  }
+}
