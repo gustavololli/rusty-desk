@@ -38,7 +38,7 @@ use crate::ui::icons8bit::{paint_pixel_icon, pixel_button, PixelIcon};
 use crate::ui::island::{IslandInput, IslandStateMachine, IslandVisibility};
 use crate::ui::pet::{
     AnimationController, AnimationFrame, EmptySection, PetBehavior, PetEvent, PetPresence,
-    PetRenderer, WindowMode,
+    PetRenderer, PetSystemHealth, SystemArea, WindowMode,
 };
 use crate::voice::{speak_local_async, ActiveRecording};
 use eframe::egui::{self, Color32, Pos2, RichText, Rounding, Stroke, Vec2};
@@ -123,6 +123,7 @@ pub struct RustyDeskApp {
     pet_controller: AnimationController,
     pet_behavior: PetBehavior,
     pet_presence: PetPresence,
+    pet_system_health: PetSystemHealth,
     pet_drag_origin: Option<Pos2>,
     pet_dragging: bool,
     last_frame_time: f64,
@@ -278,6 +279,7 @@ impl RustyDeskApp {
             pet_controller: AnimationController::default(),
             pet_behavior: PetBehavior::new(0.0),
             pet_presence: PetPresence::default(),
+            pet_system_health: PetSystemHealth::default(),
             pet_drag_origin: None,
             pet_dragging: false,
             last_frame_time: 0.0,
@@ -378,9 +380,11 @@ impl RustyDeskApp {
     }
 
     fn report_persistence_result<T>(&mut self, res: anyhow::Result<T>) {
+        let success = res.is_ok();
         if let Err(e) = res {
             self.status_banner = Some(format!("⚠️ Error de persistencia SQLite: {e}"));
         }
+        self.report_system_outcome(SystemArea::Storage, success);
     }
 
     fn send_user_message(&mut self, text: String, ctx: &egui::Context) {
@@ -610,12 +614,14 @@ impl RustyDeskApp {
                 }
                 Err(e) => {
                     self.mood = AssistantMood::Idle;
+                    self.report_system_outcome(SystemArea::Voice, false);
                     self.status_banner = Some(format!("⚠️ {e}"));
                 }
             }
         } else {
             match ActiveRecording::start() {
                 Ok(rec) => {
+                    self.report_system_outcome(SystemArea::Voice, true);
                     self.active_recording = Some(rec);
                     self.mood = AssistantMood::Listening;
                     self.emit_pet_event(PetEvent::VoiceListeningStart);
@@ -623,7 +629,7 @@ impl RustyDeskApp {
                         Some("Escuchando... volvé a tocar el micrófono para enviar.".to_string());
                 }
                 Err(e) => {
-                    self.emit_pet_event(PetEvent::ErrorOccurred);
+                    self.report_system_outcome(SystemArea::Voice, false);
                     self.status_banner = Some(format!("Micrófono no disponible: {e}"));
                 }
             }
@@ -639,6 +645,7 @@ impl RustyDeskApp {
                     raw_gemini_parts,
                     mut history_snapshot,
                 } => {
+                    self.report_system_outcome(SystemArea::Ai, true);
                     if !tool_calls.is_empty() {
                         let assistant_tool_msg = ChatMessage {
                             role: "assistant".to_string(),
@@ -833,7 +840,7 @@ impl RustyDeskApp {
                 BgEvent::AiError(err) => {
                     self.is_thinking = false;
                     self.mood = AssistantMood::Idle;
-                    self.emit_pet_event(PetEvent::AiError);
+                    self.report_system_outcome(SystemArea::Ai, false);
                     // Roll back poisoned tool turns so subsequent messages keep working
                     while self
                         .chat_history
@@ -847,6 +854,7 @@ impl RustyDeskApp {
                         .push(UiChatEntry::assistant(format!("⚠️ {err}")));
                 }
                 BgEvent::Transcribed(text) => {
+                    self.report_system_outcome(SystemArea::Voice, true);
                     self.status_banner = None;
                     if text.is_empty() {
                         self.mood = AssistantMood::Idle;
@@ -856,7 +864,7 @@ impl RustyDeskApp {
                 }
                 BgEvent::VoiceError(err) => {
                     self.mood = AssistantMood::Idle;
-                    self.emit_pet_event(PetEvent::ErrorOccurred);
+                    self.report_system_outcome(SystemArea::Voice, false);
                     self.status_banner = Some(format!("⚠️ {err}"));
                 }
                 BgEvent::MarkdownConverted {
@@ -864,6 +872,7 @@ impl RustyDeskApp {
                     markdown,
                     saved_path,
                 } => {
+                    self.report_system_outcome(SystemArea::Files, true);
                     self.md_is_converting = false;
                     self.md_source_path = Some(source);
                     self.md_saved_path = saved_path.clone();
@@ -882,7 +891,7 @@ impl RustyDeskApp {
                     self.md_is_converting = false;
                     self.md_error = Some(err.clone());
                     self.mood = AssistantMood::Idle;
-                    self.emit_pet_event(PetEvent::ErrorOccurred);
+                    self.report_system_outcome(SystemArea::Files, false);
                     sfx::play(SfxEvent::Error, self.config.sfx_enabled);
                 }
                 BgEvent::FilesPicked { for_chat, paths } => {
@@ -896,6 +905,7 @@ impl RustyDeskApp {
                     }
                 }
                 BgEvent::FilePickError(err) => {
+                    self.report_system_outcome(SystemArea::Files, false);
                     self.status_banner = Some(format!("⚠️ {err}"));
                 }
                 BgEvent::M3uPicked(maybe_path) => {
@@ -904,10 +914,12 @@ impl RustyDeskApp {
                     }
                 }
                 BgEvent::M3uPickError(err) => {
+                    self.report_system_outcome(SystemArea::Files, false);
                     self.music_status = Some(format!("⚠️ {err}"));
                 }
                 BgEvent::WeatherResult(res) => {
                     self.is_thinking = false;
+                    self.report_system_outcome(SystemArea::Tools, res.is_ok());
                     let msg = match res {
                         Ok(text) => {
                             self.mood = AssistantMood::Happy;
@@ -935,6 +947,7 @@ impl RustyDeskApp {
                     result,
                 } => {
                     self.is_thinking = false;
+                    self.report_system_outcome(SystemArea::Tools, result.is_ok());
                     let msg = match result {
                         Ok(text) => {
                             self.mood = AssistantMood::Happy;
@@ -964,6 +977,7 @@ impl RustyDeskApp {
                     waiting_for_confirmation,
                 } => {
                     for (tc_id, text, is_err) in results {
+                        self.report_system_outcome(SystemArea::Tools, !is_err);
                         let kind = if is_err {
                             MessageKind::ToolError
                         } else {
@@ -991,6 +1005,7 @@ impl RustyDeskApp {
                     }
                 }
                 BgEvent::ProviderTestResult(msg) => {
+                    self.report_system_outcome(SystemArea::Tools, !msg.starts_with('⚠'));
                     self.provider_test_status = Some(msg);
                 }
             }
@@ -1255,6 +1270,14 @@ impl RustyDeskApp {
             .on_event(event, &self.config.pet, self.mood);
     }
 
+    /// All subsystems use one short-lived failure/recovery policy. Successful
+    /// operations only trigger a recovery if that same area failed previously.
+    fn report_system_outcome(&mut self, area: SystemArea, success: bool) {
+        if let Some(event) = self.pet_system_health.observe(area, success) {
+            self.emit_pet_event(event);
+        }
+    }
+
     /// A one-shot glance when entering an empty area. No repeated animation
     /// while staying on the tab, and no inference from unrelated sections.
     fn observe_empty_section(&mut self) {
@@ -1290,12 +1313,13 @@ impl RustyDeskApp {
 
     fn emit_pet_event_for_tool(&mut self, tool_name: &str, status: &ToolStatus) {
         if *status == ToolStatus::Error {
-            self.emit_pet_event(PetEvent::ErrorOccurred);
+            self.report_system_outcome(SystemArea::Tools, false);
             return;
         }
         if *status != ToolStatus::Success {
             return;
         }
+        self.report_system_outcome(SystemArea::Tools, true);
         match tool_name {
             "complete_task" => self.emit_pet_event(PetEvent::TaskCompleted),
             "log_habit" => self.emit_pet_event(PetEvent::HabitCompleted),
@@ -1308,7 +1332,7 @@ impl RustyDeskApp {
                 }
             }
             "convert_to_markdown" => self.emit_pet_event(PetEvent::MarkdownConverted),
-            _ => {}
+            _ => self.emit_pet_event(PetEvent::OperationSucceeded),
         }
     }
 
@@ -3305,6 +3329,8 @@ impl RustyDeskApp {
                     .import_m3u_playlist(&name, Some(&source_str), &new_tracks)
                 {
                     Ok(saved) => {
+                        self.report_system_outcome(SystemArea::Files, true);
+                        self.report_system_outcome(SystemArea::Storage, true);
                         let count = saved.track_count;
                         let id = saved.id.clone();
                         self.select_music_playlist(&id);
@@ -3312,14 +3338,17 @@ impl RustyDeskApp {
                             "Playlist '{}' guardada ({count} pistas).",
                             saved.name
                         ));
+                        self.emit_pet_event(PetEvent::OperationSucceeded);
                         self.music_m3u_path_input.clear();
                     }
                     Err(e) => {
+                        self.report_system_outcome(SystemArea::Storage, false);
                         self.music_status = Some(format!("⚠️ Error guardando playlist: {e}"));
                     }
                 }
             }
             Err(err) => {
+                self.report_system_outcome(SystemArea::Files, false);
                 self.music_status = Some(format!("⚠️ {err}"));
             }
         }
@@ -3332,6 +3361,7 @@ impl RustyDeskApp {
             raw_url,
         ) {
             Ok((playlist, track)) => {
+                self.report_system_outcome(SystemArea::Storage, true);
                 if self.music_selected_playlist_id.as_deref() == Some(playlist.id.as_str()) {
                     self.music_tracks.push(track.clone());
                 } else {
@@ -3341,10 +3371,12 @@ impl RustyDeskApp {
                     "URL guardada en '{}': {}",
                     playlist.name, track.title
                 ));
+                self.emit_pet_event(PetEvent::OperationSucceeded);
                 self.music_url_input.clear();
                 self.music_url_title_input.clear();
             }
             Err(e) => {
+                self.report_system_outcome(SystemArea::Storage, false);
                 self.music_status = Some(format!("⚠️ {e}"));
             }
         }
@@ -3499,10 +3531,12 @@ impl RustyDeskApp {
         self.music_player.set_muted(self.config.audio_muted);
         match self.music_player.play(&track.uri) {
             Ok(()) => {
+                self.report_system_outcome(SystemArea::Music, true);
                 self.music_current_track_idx = Some(idx);
                 self.music_status = Some(format!("▶ Reproduciendo: {}", track.title));
             }
             Err(e) => {
+                self.report_system_outcome(SystemArea::Music, false);
                 self.music_status = Some(format!("⚠️ {e}"));
             }
         }

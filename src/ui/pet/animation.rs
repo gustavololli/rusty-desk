@@ -102,6 +102,7 @@ pub struct AnimationController {
     empty_section_reaction: Option<EmptySection>,
     teased_glance_pending: bool,
     teased_until: f32,
+    recovery_pending: bool,
 }
 
 impl Default for AnimationController {
@@ -125,6 +126,7 @@ impl Default for AnimationController {
             empty_section_reaction: None,
             teased_glance_pending: false,
             teased_until: 0.0,
+            recovery_pending: false,
         }
     }
 }
@@ -178,6 +180,12 @@ impl AnimationController {
 
     /// Processes a semantic event, respecting priority rules and user preferences.
     pub fn on_event(&mut self, event: PetEvent, config: &PetConfig, mood: AssistantMood) {
+        // Remember recovery until a current error/celebration animation ends;
+        // never replace an active critical animation with an instant smile.
+        if event == PetEvent::SystemRecovered {
+            self.recovery_pending = true;
+            return;
+        }
         let ev_prio = event.priority();
 
         // Transient critical/high states can only be preempted by equal or higher priority,
@@ -341,6 +349,12 @@ impl AnimationController {
                     }
                 }
             }
+            PetEvent::OperationSucceeded => {
+                if config.auto_animations && self.state == AnimationState::Idle {
+                    self.transition(AnimationState::Happy, EventPriority::Low, Some(0.9));
+                }
+            }
+            PetEvent::SystemRecovered => unreachable!("handled before priority gate"),
             PetEvent::ModeChanged(_) => {
                 if self.state == AnimationState::Sleep {
                     self.transition(AnimationState::WakeUp, EventPriority::Normal, Some(0.65));
@@ -381,6 +395,15 @@ impl AnimationController {
                     let recovery = Self::base_state_for_mood(mood);
                     self.transition(recovery, EventPriority::Low, None);
                 }
+            }
+        }
+
+        if self.recovery_pending && self.state_duration.is_none()
+            && matches!(self.state, AnimationState::Idle | AnimationState::Focused)
+        {
+            self.recovery_pending = false;
+            if config.auto_animations {
+                self.transition(AnimationState::Happy, EventPriority::High, Some(1.35));
             }
         }
 

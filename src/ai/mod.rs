@@ -436,8 +436,6 @@ impl AiProvider for GoogleGeminiProvider {
         messages: &[ChatMessage],
         tools: &[ToolDef],
     ) -> anyhow::Result<AiResponse> {
-        let url = format!("{}/models/{}:generateContent", self.base_url, self.model);
-
         let system_text: String = messages
             .iter()
             .filter(|m| m.role == "system")
@@ -531,38 +529,57 @@ impl AiProvider for GoogleGeminiProvider {
 
         let mut last_status = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
         let mut text = String::new();
-        for attempt in 0..3 {
-            let resp = match self
-                .client
-                .post(&url)
-                .header("X-goog-api-key", self.api_key.trim())
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(_e) if attempt < 2 => {
-                    tokio::time::sleep(std::time::Duration::from_secs(attempt + 1)).await;
+        // Only the moving "latest" alias gets an automatic alternative.
+        // Explicitly selected models are never silently replaced. 429 is a
+        // quota/rate limit, not evidence that the model is overloaded.
+        let overload_fallback = self.model == "gemini-flash-latest";
+        let models: Vec<&str> = if overload_fallback {
+            vec![self.model.as_str(), "gemini-2.5-flash"]
+        } else {
+            vec![self.model.as_str()]
+        };
+        'models: for (model_index, model) in models.iter().enumerate() {
+            let url = format!("{}/models/{}:generateContent", self.base_url, model);
+            let attempts = if model_index == 0 { 3 } else { 2 };
+            for attempt in 0..attempts {
+                let resp = match self
+                    .client
+                    .post(&url)
+                    .header("X-goog-api-key", self.api_key.trim())
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(_e) if attempt + 1 < attempts => {
+                        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Error de red con Gemini: {e:#}"));
+                    }
+                };
+
+                last_status = resp.status();
+                text = resp
+                    .text()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Error leyendo respuesta de Gemini: {e:#}"))?;
+                if last_status.is_success() {
+                    break 'models;
+                }
+                if (last_status.as_u16() == 503 || last_status.as_u16() == 429)
+                    && attempt + 1 < attempts
+                {
+                    tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
                     continue;
                 }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Error de red con Gemini: {e:#}"));
+                if last_status.as_u16() == 503 && model_index == 0 && overload_fallback {
+                    eprintln!("Gemini Flash latest saturado (503); probando gemini-2.5-flash");
+                    break; // try Flash stable with the same API key
                 }
-            };
-
-            last_status = resp.status();
-            text = resp
-                .text()
-                .await
-                .map_err(|e| anyhow::anyhow!("Error leyendo respuesta de Gemini: {e:#}"))?;
-            if last_status.is_success() {
-                break;
+                anyhow::bail!("Error de Gemini ({last_status}) en {model}: {text}");
             }
-            if (last_status.as_u16() == 503 || last_status.as_u16() == 429) && attempt < 2 {
-                tokio::time::sleep(std::time::Duration::from_secs(attempt + 1)).await;
-                continue;
-            }
-            anyhow::bail!("Error de Gemini ({last_status}): {text}");
         }
         if !last_status.is_success() {
             anyhow::bail!("Error de Gemini ({last_status}): {text}");
@@ -792,5 +809,31 @@ mod tests {
             Some("sig-123")
         );
         assert!(resp.raw_gemini_parts.is_some());
+    }
+
+    #[tokio::test]
+    async fn gemini_overload_falls_back_to_stable_flash() {
+        let overloaded = r#"{"error":{"status":"UNAVAILABLE"}}"#.to_string();
+        let base_url = spawn_mock_http_server(vec![
+            (503, overloaded.clone()),
+            (503, overloaded.clone()),
+            (503, overloaded),
+            (200, r#"{"candidates":[{"content":{"parts":[{"text":"Volví"}]}}]}"#.to_string()),
+        ]);
+        let provider = GoogleGeminiProvider::new(
+            base_url, "test-key".into(), "gemini-flash-latest".into(),
+        );
+        let response = provider.chat(&[ChatMessage::user("Hola")], &[]).await.unwrap();
+        assert_eq!(response.content.as_deref(), Some("Volví"));
+    }
+
+    #[tokio::test]
+    async fn gemini_other_client_errors_never_trigger_fallback() {
+        let base_url = spawn_mock_http_server(vec![(400, "invalid model".into())]);
+        let provider = GoogleGeminiProvider::new(
+            base_url, "test-key".into(), "gemini-flash-latest".into(),
+        );
+        let err = provider.chat(&[ChatMessage::user("Hola")], &[]).await.unwrap_err();
+        assert!(err.to_string().contains("400"));
     }
 }

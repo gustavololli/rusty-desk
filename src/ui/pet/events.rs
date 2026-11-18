@@ -43,6 +43,8 @@ pub enum PetEvent {
     CuriosityTrigger,
     LongWorkSession,
     UserReturned,
+    SystemRecovered,
+    OperationSucceeded,
     SectionEmpty(EmptySection),
 }
 
@@ -70,6 +72,7 @@ impl PetEvent {
             | Self::UserClicked
             | Self::VoiceListeningStart
             | Self::AiThinking => EventPriority::High,
+            Self::SystemRecovered => EventPriority::High,
             Self::PomodoroStarted
             | Self::PomodoroPaused
             | Self::VoiceListeningStop
@@ -78,7 +81,7 @@ impl PetEvent {
             | Self::UserHovered => EventPriority::Normal,
             Self::UserReturned => EventPriority::Normal,
             Self::IdleTimeout | Self::CuriosityTrigger | Self::SectionEmpty(_)
-            | Self::LongWorkSession => EventPriority::Low,
+            | Self::LongWorkSession | Self::OperationSucceeded => EventPriority::Low,
         }
     }
 }

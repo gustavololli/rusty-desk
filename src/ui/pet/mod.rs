@@ -1,6 +1,7 @@
 pub mod animation;
 pub mod behavior;
 pub mod events;
+pub mod health;
 pub mod motion;
 pub mod presence;
 pub mod renderer;
@@ -8,6 +9,7 @@ pub mod renderer;
 pub use animation::{AnimationController, AnimationFrame};
 pub use behavior::PetBehavior;
 pub use events::{EmptySection, PetEvent, WindowMode};
+pub use health::{PetSystemHealth, SystemArea};
 pub use renderer::PetRenderer;
 pub use presence::PetPresence;
 
@@ -174,6 +176,20 @@ mod tests {
         ctrl.on_event(PetEvent::AiThinking, &cfg, AssistantMood::Thinking);
         ctrl.on_event(PetEvent::UserReturned, &cfg, AssistantMood::Thinking);
         assert_eq!(ctrl.state(), AnimationState::Thinking);
+    }
+
+    #[test]
+    fn connection_recovery_waits_until_error_animation_finishes() {
+        let cfg = PetConfig::default();
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::ErrorOccurred, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Glitch);
+        ctrl.on_event(PetEvent::SystemRecovered, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Glitch);
+        for _ in 0..16 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        assert_eq!(ctrl.state(), AnimationState::Happy);
+        for _ in 0..17 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        assert_eq!(ctrl.state(), AnimationState::Idle);
     }
 
     #[test]

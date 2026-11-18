@@ -41,6 +41,16 @@ PNG existentes. No se añade ningún servicio externo.
   - Tras seis clics rápidos aparece el fastidio habitual y, después de
     recuperarse, **una mirada de reojo** si no expiraron 12 segundos.
   - La celebración de fin de Pomodoro ya existía; se conserva sin duplicarla.
+- Respuesta de proveedores y servicios conectada a una salud local por área:
+  **IA, herramientas, SQLite, voz, reproductor y archivos**. El primer fallo genera una
+  reacción de error; fallos consecutivos no repiten el glitch; el primer éxito
+  **del mismo componente** tras ese fallo deja una reacción alegre pendiente,
+  que espera hasta que finalice una animación crítica.
+- Gemini `gemini-flash-latest`: tras tres intentos 503, prueba
+  `gemini-2.5-flash` (hasta dos intentos) con la misma clave. No cambia la
+  configuración guardada, no añade proveedor ni utiliza pagos nuevos.
+  Los errores 429 se reintentan, pero **no** se interpretan como sobrecarga
+  para cambiar de modelo; tampoco hay fallback ante 400/401/403.
 
 ## Limitación visual conocida
 
