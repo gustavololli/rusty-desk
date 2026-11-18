@@ -1750,7 +1750,11 @@ impl eframe::App for RustyDeskApp {
                             self.render_compact_island(ui, ctx, pointer_pos, accent, &pet_frame);
                         });
                     });
-                    retro::paint_oxidized_bezel(ui.painter(), framed.response.rect);
+                    retro::paint_oxidized_bezel(
+                        ui.painter(),
+                        framed.response.rect,
+                        retro::BezelSize::Island,
+                    );
                 });
             return;
         }
@@ -2022,7 +2026,11 @@ impl eframe::App for RustyDeskApp {
                     }
                     }
                 });
-                retro::paint_oxidized_bezel(ui.painter(), framed.response.rect);
+                retro::paint_oxidized_bezel(
+                    ui.painter(),
+                    framed.response.rect,
+                    retro::BezelSize::Window,
+                );
             });
     }
 }
@@ -2175,7 +2183,7 @@ impl RustyDeskApp {
             0.0,
             Color32::from_rgba_unmultiplied(NIGHT.r(), NIGHT.g(), NIGHT.b(), 245),
         );
-        retro::paint_oxidized_bezel(painter, avail);
+        retro::paint_oxidized_bezel(painter, avail, retro::BezelSize::Notch);
         let sprite_area = interior.shrink(2.0);
         let side = crate::ui::sprites::display_side(
             sprite_area.width().min(sprite_area.height()),
