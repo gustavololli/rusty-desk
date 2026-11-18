@@ -1,6 +1,7 @@
 use markitdown::model::ConversionOptions;
 use markitdown::MarkItDown;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
