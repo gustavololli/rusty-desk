@@ -1381,9 +1381,9 @@ impl RustyDeskApp {
 
     fn island_expanded_size(&self, music_active: bool) -> [f32; 2] {
         if music_active {
-            [360.0, 118.0]
+            [440.0, 174.0]
         } else {
-            [360.0, 66.0]
+            [440.0, 76.0]
         }
     }
 
@@ -2152,7 +2152,10 @@ impl RustyDeskApp {
                         self.config.pet.follow_cursor,
                     );
                     ui.add_space(4.0);
-                    ui.vertical(|ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new((ui.available_width() - 166.0).max(90.0), 48.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
                         let pomo_active = self.data.pomodoro.phase != PomodoroPhase::Idle;
                         let title_line = if pomo_active {
                             let icon = match self.data.pomodoro.phase {
@@ -2175,12 +2178,9 @@ impl RustyDeskApp {
                         } else {
                             self.config.assistant_name.clone()
                         };
-                        ui.label(
-                            RichText::new(title_line)
-                                .strong()
-                                .size(13.0)
-                                .color(Color32::WHITE),
-                        );
+                        ui.add(egui::Label::new(
+                            RichText::new(title_line).strong().size(13.0).color(Color32::WHITE),
+                        ).truncate());
                         let sub = if pomo_active {
                             if let Some(t) = self.data.active_task_display_title() {
                                 truncate_chars(&t, 26)
@@ -2200,7 +2200,7 @@ impl RustyDeskApp {
                             let pending = self.data.tasks.iter().filter(|t| !t.done).count();
                             format!("{pending} pendientes")
                         };
-                        ui.label(RichText::new(sub).size(11.0).color(accent));
+                        ui.add(egui::Label::new(RichText::new(sub).size(11.0).color(accent)).truncate());
                     });
                 });
                 let drag_resp = self.handle_drag(ui, ctx, drag_area.response.rect);
@@ -3632,18 +3632,17 @@ impl RustyDeskApp {
         let is_paused = self.music_player.is_paused();
 
         ui.vertical(|ui| {
-            ui.horizontal_wrapped(|ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
                 let (icon_rect, _) =
                     ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
                 paint_pixel_icon(ui.painter(), icon_rect, PixelIcon::MusicNote, accent);
 
-                let controls_w = if has_multiple { 122.0 } else { 62.0 }
-                    + if compact_island { 0.0 } else { 140.0 };
                 let remaining = ui.available_width();
-                let title_w = if remaining > controls_w + 60.0 {
-                    remaining - controls_w
+                let title_w = if compact_island {
+                    remaining.max(60.0)
                 } else {
-                    remaining.min(180.0).max(60.0)
+                    (remaining - if has_multiple { 122.0 } else { 62.0 } - 140.0).max(60.0)
                 };
 
                 ui.allocate_ui_with_layout(
@@ -3666,7 +3665,9 @@ impl RustyDeskApp {
                         }
                     },
                 );
+                });
 
+                ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if has_multiple
                         && pixel_button(
@@ -3729,6 +3730,7 @@ impl RustyDeskApp {
                     if !compact_island {
                         self.render_volume_controls(ui, 68.0, true);
                     }
+                });
                 });
             });
 
