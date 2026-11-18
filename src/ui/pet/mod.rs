@@ -75,6 +75,38 @@ mod tests {
     }
 
     #[test]
+    fn pet_click_streak_reacts_then_recovers() {
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig::default();
+        for click in 1..=6 {
+            ctrl.on_event(PetEvent::UserClicked, &cfg, AssistantMood::Idle);
+            assert_eq!(ctrl.state(), match click {
+                1 | 2 => AnimationState::Happy,
+                3..=5 => AnimationState::Celebrate,
+                _ => AnimationState::Error,
+            });
+            ctrl.tick(0.12, AssistantMood::Idle, &cfg);
+        }
+        for _ in 0..20 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        assert_eq!(ctrl.state(), AnimationState::Idle);
+        ctrl.on_event(PetEvent::UserClicked, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Happy);
+    }
+
+    #[test]
+    fn awakening_does_not_count_as_teasing() {
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig::default();
+        ctrl.on_event(PetEvent::IdleTimeout, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Sleep);
+        ctrl.on_event(PetEvent::UserClicked, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::WakeUp);
+        ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        ctrl.on_event(PetEvent::UserClicked, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Happy);
+    }
+
+    #[test]
     fn reduce_animations_disables_particles_and_bobbing() {
         let mut ctrl = AnimationController::default();
         let cfg = PetConfig {

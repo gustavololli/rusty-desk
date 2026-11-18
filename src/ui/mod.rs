@@ -1929,6 +1929,10 @@ impl RustyDeskApp {
 
         if resp.clicked() && !self.pet_dragging {
             self.emit_pet_event(PetEvent::UserClicked);
+        }
+        // Single-click is now a playful interaction. Keep Island accessible
+        // through a double-click and the existing right-click context menu.
+        if resp.double_clicked() && !self.pet_dragging {
             self.set_window_mode(ctx, WindowMode::Island);
         }
 

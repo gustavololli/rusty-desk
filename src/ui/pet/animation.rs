@@ -97,6 +97,8 @@ pub struct AnimationController {
     is_playing_music: bool,
     motion: MotionController,
     motion_pose: MotionPose,
+    click_streak: u8,
+    last_click_time: f32,
 }
 
 impl Default for AnimationController {
@@ -115,6 +117,8 @@ impl Default for AnimationController {
             is_playing_music: false,
             motion: MotionController::default(),
             motion_pose: MotionPose::default(),
+            click_streak: 0,
+            last_click_time: -10.0,
         }
     }
 }
@@ -185,9 +189,27 @@ impl AnimationController {
         match event {
             PetEvent::UserClicked => {
                 if self.state == AnimationState::Sleep {
+                    // A sleeping Rusty wakes on the first touch. It does not
+                    // count as teasing and cannot immediately trigger annoyance.
+                    self.click_streak = 0;
                     self.transition(AnimationState::WakeUp, EventPriority::High, Some(0.75));
                 } else {
-                    self.transition(AnimationState::Happy, EventPriority::High, Some(1.0));
+                    // A little Tamagotchi personality, using the existing
+                    // 16-bit expressions rather than adding/replacing sprites.
+                    if self.total_time - self.last_click_time > 1.5 {
+                        self.click_streak = 0;
+                    }
+                    self.click_streak = self.click_streak.saturating_add(1);
+                    self.last_click_time = self.total_time;
+                    if self.click_streak >= 6 {
+                        // Frown / indignant reaction, then automatic recovery.
+                        self.transition(AnimationState::Error, EventPriority::High, Some(1.45));
+                    } else if self.click_streak >= 3 {
+                        // Laughter-like celebration with smile and sparkles.
+                        self.transition(AnimationState::Celebrate, EventPriority::High, Some(1.3));
+                    } else {
+                        self.transition(AnimationState::Happy, EventPriority::High, Some(1.0));
+                    }
                 }
             }
             PetEvent::UserHovered => {

@@ -18,6 +18,12 @@ PNG existentes. No se añade ningún servicio externo.
   global** ni otras ventanas.
 - La cadencia solicitada pasa a ~60 FPS para interpolar los movimientos,
   respetando `reduce_animations`.
+- Clics sobre Rusty en modo mascota: 1–2 = feliz, 3–5 seguidos = risa
+  (celebración), 6 o más = fastidio temporal (ceño fruncido). La cuenta se
+  reinicia después de 1.5 segundos sin clics. Dormido se despierta al primer
+  toque, sin contar ese toque como una molestia.
+- El clic simple ya no cambia de modo: **doble clic para abrir Isla**;
+  el menú contextual con clic derecho sigue ofreciendo Isla y asistente.
 
 ## Limitación visual conocida
 
