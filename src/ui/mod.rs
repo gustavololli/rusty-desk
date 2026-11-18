@@ -1786,15 +1786,11 @@ impl eframe::App for RustyDeskApp {
                                         } else {
                                             let pending =
                                                 self.data.tasks.iter().filter(|t| !t.done).count();
-                                            format!("{pending} pendientes • Arrastrar aqui")
+                                            format!("{pending} tareas pendientes")
                                         };
                                         ui.add(
-                                            egui::Label::new(
-                                                RichText::new(status_text)
-                                                    .size(11.5)
-                                                    .color(retro::MUTED),
-                                            )
-                                            .wrap(),
+                                            egui::Label::new(RichText::new(status_text)
+                                                .size(11.5).color(retro::MUTED)).truncate(),
                                         );
                                     });
                                 },
@@ -2540,7 +2536,7 @@ impl RustyDeskApp {
                         }
 
                         let resp = ui.add_sized(
-                            [ui.available_width() - 72.0, 28.0],
+                            [(ui.available_width() - 72.0).max(90.0), 28.0],
                             egui::TextEdit::singleline(&mut self.chat_input)
                                 .frame(false)
                                 .hint_text("Escribí una orden o pregunta..."),
@@ -2603,7 +2599,7 @@ impl RustyDeskApp {
     fn render_tasks_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let resp = ui.add_sized(
-                [ui.available_width() - 82.0, 28.0],
+                [(ui.available_width() - 82.0).max(90.0), 28.0],
                 egui::TextEdit::singleline(&mut self.new_task_input).hint_text("Nueva tarea..."),
             );
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -2998,13 +2994,13 @@ impl RustyDeskApp {
 
         ui.separator();
         ui.label(RichText::new("Nuevo hábito").strong());
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add_sized(
                 [36.0, 24.0],
                 egui::TextEdit::singleline(&mut self.new_habit_icon),
             );
             ui.add_sized(
-                [180.0, 24.0],
+                [180.0_f32.min((ui.available_width() - 145.0).max(105.0)), 24.0],
                 egui::TextEdit::singleline(&mut self.new_habit_name).hint_text("Ej. Leer páginas"),
             );
             ui.add(egui::DragValue::new(&mut self.new_habit_goal).range(1..=100));
@@ -3575,14 +3571,19 @@ impl RustyDeskApp {
         let is_paused = self.music_player.is_paused();
 
         ui.vertical(|ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let (icon_rect, _) =
                     ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
                 paint_pixel_icon(ui.painter(), icon_rect, PixelIcon::MusicNote, accent);
 
                 let controls_w = if has_multiple { 122.0 } else { 62.0 }
                     + if compact_island { 0.0 } else { 140.0 };
-                let title_w = (ui.available_width() - controls_w).max(60.0);
+                let remaining = ui.available_width();
+                let title_w = if remaining > controls_w + 60.0 {
+                    remaining - controls_w
+                } else {
+                    remaining.min(180.0).max(60.0)
+                };
 
                 ui.allocate_ui_with_layout(
                     Vec2::new(title_w, 22.0),
@@ -3694,79 +3695,75 @@ impl RustyDeskApp {
             }
         }
         ui.label(RichText::new("Agregar playlist (.m3u / .m3u8)").strong());
-        ui.horizontal(|ui| {
+        // Stack the input above its actions. Fixed-width horizontal controls
+        // previously pushed "Elegir .m3u" outside narrow windows.
+        ui.vertical(|ui| {
             let input_resp = ui.add_sized(
-                [ui.available_width() - 185.0, 26.0],
+                [ui.available_width(), 26.0],
                 egui::TextEdit::singleline(&mut self.music_m3u_path_input)
                     .hint_text("Ruta al archivo .m3u..."),
             );
             let enter = input_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (pixel_button(
-                ui,
-                PixelIcon::Save,
-                "Agregar",
-                accent,
-                Color32::from_rgb(15, 20, 32),
-                "Importar archivo .m3u a SQLite",
-            )
-            .clicked()
-                || enter)
-                && !self.music_m3u_path_input.trim().is_empty()
-            {
-                let trimmed = self.music_m3u_path_input.trim().to_string();
-                if music::is_remote_or_uri(&trimmed) {
-                    self.add_music_url_from_input(&trimmed, None);
-                    self.music_m3u_path_input.clear();
-                } else {
-                    let p = PathBuf::from(trimmed);
-                    self.import_m3u_from_path(&p);
+            ui.horizontal_wrapped(|ui| {
+                if (pixel_button(
+                    ui,
+                    PixelIcon::Save,
+                    "Agregar",
+                    accent,
+                    Color32::from_rgb(15, 20, 32),
+                    "Importar archivo .m3u a SQLite",
+                ).clicked() || enter) && !self.music_m3u_path_input.trim().is_empty() {
+                    let trimmed = self.music_m3u_path_input.trim().to_string();
+                    if music::is_remote_or_uri(&trimmed) {
+                        self.add_music_url_from_input(&trimmed, None);
+                        self.music_m3u_path_input.clear();
+                    } else {
+                        let p = PathBuf::from(trimmed);
+                        self.import_m3u_from_path(&p);
+                    }
                 }
-            }
-            if pixel_button(
-                ui,
-                PixelIcon::Attach,
-                "Elegir .m3u",
-                Color32::from_rgb(30, 41, 59),
-                Color32::WHITE,
-                "Buscar archivo .m3u en el sistema",
-            )
-            .clicked()
-            {
-                self.spawn_m3u_picker(ctx);
-            }
+                if pixel_button(
+                    ui,
+                    PixelIcon::Attach,
+                    "Elegir .m3u",
+                    Color32::from_rgb(30, 41, 59),
+                    Color32::WHITE,
+                    "Buscar archivo .m3u en el sistema",
+                ).clicked() {
+                    self.spawn_m3u_picker(ctx);
+                }
+            });
         });
 
         ui.add_space(6.0);
         ui.label(RichText::new("Agregar URL (radio / stream / audio)").strong());
-        ui.horizontal(|ui| {
+        ui.vertical(|ui| {
             let url_resp = ui.add_sized(
-                [ui.available_width() * 0.56, 26.0],
+                [ui.available_width(), 26.0],
                 egui::TextEdit::singleline(&mut self.music_url_input)
                     .hint_text("https://... (stream o audio)"),
             );
             let title_resp = ui.add_sized(
-                [(ui.available_width() - 108.0).max(70.0), 26.0],
+                [ui.available_width(), 26.0],
                 egui::TextEdit::singleline(&mut self.music_url_title_input)
                     .hint_text("Nombre (opcional)"),
             );
             let enter = (url_resp.lost_focus() || title_resp.lost_focus())
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (pixel_button(
-                ui,
-                PixelIcon::Save,
-                "Guardar URL",
-                accent,
-                Color32::from_rgb(15, 20, 32),
-                "Guardar URL en SQLite",
-            )
-            .clicked()
-                || enter)
-                && !self.music_url_input.trim().is_empty()
-            {
-                let url = self.music_url_input.clone();
-                let title = self.music_url_title_input.clone();
-                self.add_music_url_from_input(&url, Some(&title));
-            }
+            ui.horizontal(|ui| {
+                if (pixel_button(
+                    ui,
+                    PixelIcon::Save,
+                    "Guardar URL",
+                    accent,
+                    Color32::from_rgb(15, 20, 32),
+                    "Guardar URL en SQLite",
+                ).clicked() || enter) && !self.music_url_input.trim().is_empty() {
+                    let url = self.music_url_input.clone();
+                    let title = self.music_url_title_input.clone();
+                    self.add_music_url_from_input(&url, Some(&title));
+                }
+            });
         });
 
         ui.add_space(6.0);
@@ -3778,7 +3775,7 @@ impl RustyDeskApp {
             .rounding(0.0)
             .inner_margin(8.0)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if !is_active {
                         if pixel_button(
                             ui,
@@ -3876,7 +3873,11 @@ impl RustyDeskApp {
                             .is_some_and(|id| id == pl.id);
                         ui.horizontal(|ui| {
                             let label = format!("{} ({} pistas)", pl.name, pl.track_count);
-                            if ui.selectable_label(is_selected, label).clicked() {
+                            let title_width = (ui.available_width() - 45.0).max(90.0);
+                            if ui.add_sized(
+                                [title_width, 25.0],
+                                egui::SelectableLabel::new(is_selected, label),
+                            ).on_hover_text(&pl.name).clicked() {
                                 selected_to_load = Some(pl.id.clone());
                             }
                             ui.with_layout(
@@ -3940,7 +3941,11 @@ impl RustyDeskApp {
                             None => format!("{}. {}", idx + 1, track.title),
                         };
                         ui.horizontal(|ui| {
-                            if ui.selectable_label(active, label).clicked() {
+                            let title_width = (ui.available_width() - 45.0).max(90.0);
+                            if ui.add_sized(
+                                [title_width, 25.0],
+                                egui::SelectableLabel::new(active, label),
+                            ).on_hover_text(&track.title).clicked() {
                                 clicked_track = Some(idx);
                             }
                             ui.with_layout(
