@@ -1,4 +1,5 @@
 pub mod avatar;
+pub mod frame9;
 pub mod icons8bit;
 pub mod island;
 pub mod pet;
@@ -1754,9 +1755,10 @@ impl eframe::App for RustyDeskApp {
                             self.render_compact_island(ui, ctx, pointer_pos, accent, &pet_frame);
                         });
                     });
-                    retro::paint_oxidized_bezel(
+                    frame9::paint_frame(
                         ui.painter(),
                         viewport,
+                        ctx,
                         retro::BezelSize::Island,
                     );
                 });
@@ -2031,9 +2033,10 @@ impl eframe::App for RustyDeskApp {
                     }
                     }
                 });
-                retro::paint_oxidized_bezel(
+                frame9::paint_frame(
                     ui.painter(),
                     viewport,
+                    ctx,
                     retro::BezelSize::Window,
                 );
             });
@@ -2188,7 +2191,7 @@ impl RustyDeskApp {
             0.0,
             Color32::from_rgba_unmultiplied(NIGHT.r(), NIGHT.g(), NIGHT.b(), 245),
         );
-        retro::paint_oxidized_bezel(painter, avail, retro::BezelSize::Notch);
+        frame9::paint_frame(painter, avail, ui.ctx(), retro::BezelSize::Notch);
         let sprite_area = interior.shrink(2.0);
         let side = crate::ui::sprites::display_side(
             sprite_area.width().min(sprite_area.height()),

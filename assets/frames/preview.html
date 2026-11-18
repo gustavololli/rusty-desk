@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Rusty — Nine-slice QA</title>
+<style>body{margin:0;background:#241f20;color:#e6e8ef;font:14px monospace;padding:24px}canvas{display:block;image-rendering:pixelated;margin-top:12px}p{margin:20px 0 5px}</style>
+<h2>Rusty — prueba de borde 9-slice</h2>
+<p>Ventana principal (580 × 820)</p><canvas id="window" width="580" height="820"></canvas>
+<p>Isla (440 × 100)</p><canvas id="island" width="440" height="100"></canvas>
+<p>Notch (88 × 24) — ampliado 3× solo para inspección</p><canvas id="notch" width="264" height="72"></canvas>
+<script>
+const img = new Image(); img.src = './rusty-oxidized-9slice.png';
+img.onload = () => {
+  for(const [name,w,h,c,scale] of [['window',580,820,22,1],['island',440,100,14,1],['notch',88,24,6,3]]) {
+    const cv = document.getElementById(name), cx=cv.getContext('2d');
+    cx.imageSmoothingEnabled = false;
+    cx.scale(scale,scale);
+    cx.fillStyle='#0a1020';cx.fillRect(0,0,w,h);
+    const xs=[0,c,w-c,w],ys=[0,c,h-c,h];
+    const q=img.width*.12, us=[0,q,img.width-q,img.width],vs=[0,q,img.height-q,img.height];
+    for(let row=0;row<3;row++)for(let col=0;col<3;col++){
+      if(row===1&&col===1)continue;
+      cx.drawImage(img,us[col],vs[row],us[col+1]-us[col],vs[row+1]-vs[row],xs[col],ys[row],xs[col+1]-xs[col],ys[row+1]-ys[row]);
+    }
+    if(name==='window') {cx.fillStyle='#f0a900';cx.fillText('Rusty',45,65);cx.fillStyle='#e9edf4';cx.fillText('La interfaz permanece dentro del marco',40,115);}
+    if(name==='island') {cx.fillStyle='#f2e9d5';cx.fillText('Rusty  ·  Enfoque pausado',27,40);}
+  }
+};
+</script>
+</html>
