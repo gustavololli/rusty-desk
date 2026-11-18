@@ -21,3 +21,7 @@ x11rb = "0.13"
 markitdown = "0.1.11"
 rusqlite = { version = "0.32", features = ["bundled"] }
 png = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+rfd = "0.18"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Com", "Win32_UI_WindowsAndMessaging"] }

@@ -83,6 +83,18 @@ pub fn play(event: SfxEvent, enabled: bool) {
 }
 
 fn play_wav_file(path: &Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Media::Audio::{PlaySoundW, SND_FILENAME, SND_NODEFAULT, SND_SYNC};
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let _ = unsafe { PlaySoundW(PCWSTR(wide.as_ptr()), None, SND_FILENAME | SND_NODEFAULT | SND_SYNC) };
+        return;
+    }
+    #[cfg(not(windows))]
+    {
     let players: &[(&str, &[&str])] = &[
         ("pw-play", &[]),
         ("paplay", &[]),
@@ -98,6 +110,7 @@ fn play_wav_file(path: &Path) {
                 }
             }
         }
+    }
     }
 }
 

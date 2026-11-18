@@ -22,7 +22,7 @@ use crate::organizer::FileOrganizer;
 use crate::persistence::{ConversationSummary, MessageKind, NewMusicTrack, PersistedTrack};
 use crate::platform::{
     apply_platform_always_on_top, detect_current_monitor, detect_session_kind,
-    query_x11_virtual_bounds, spawn_global_cursor_tracker, MonitorRect, SessionKind,
+    host_os_label, query_x11_virtual_bounds, spawn_global_cursor_tracker, MonitorRect, SessionKind,
 };
 use crate::sfx::{self, SfxEvent};
 use crate::state::{
@@ -2087,7 +2087,7 @@ impl RustyDeskApp {
                     } else {
                         "Pausar"
                     };
-                    if ui.small_button(pause_lbl).clicked() {
+                    if ui.add_enabled(!cfg!(windows), egui::Button::new(pause_lbl)).clicked() {
                         self.music_player.toggle_pause();
                     }
                     if ui.small_button("Detener").clicked() {
@@ -3695,7 +3695,7 @@ impl RustyDeskApp {
                         self.stop_music();
                     }
 
-                    if pixel_button(
+                    if ui.add_enabled_ui(!cfg!(windows), |ui| pixel_button(
                         ui,
                         if is_paused {
                             PixelIcon::Play
@@ -3706,7 +3706,7 @@ impl RustyDeskApp {
                         Color32::from_rgb(30, 41, 59),
                         Color32::WHITE,
                         if is_paused { "Reanudar" } else { "Pausar" },
-                    )
+                    )).inner
                     .clicked()
                     {
                         self.music_player.toggle_pause();
@@ -3851,7 +3851,7 @@ impl RustyDeskApp {
                             let idx = self.music_current_track_idx.unwrap_or(0);
                             self.play_music_track_at(idx);
                         }
-                    } else if pixel_button(
+                    } else if ui.add_enabled_ui(!cfg!(windows), |ui| pixel_button(
                         ui,
                         if is_paused {
                             PixelIcon::Play
@@ -3866,7 +3866,7 @@ impl RustyDeskApp {
                         } else {
                             "Pausar reproducción"
                         },
-                    )
+                    )).inner
                     .clicked()
                     {
                         self.music_player.toggle_pause();
@@ -4819,6 +4819,7 @@ impl RustyDeskApp {
     }
 
     fn render_settings_ai_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!("Sistema detectado: {}", host_os_label()));
         ui.label(RichText::new("Presets rápidos de API").strong());
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("Google Gemini").clicked() {

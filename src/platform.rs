@@ -1,6 +1,18 @@
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 
+/// Compile-time host detection; native backends are selected by the target OS.
+pub fn host_os_label() -> &'static str {
+    #[cfg(target_os = "windows")]
+    { return "Windows"; }
+    #[cfg(target_os = "linux")]
+    { return "Linux"; }
+    #[cfg(target_os = "macos")]
+    { return "macOS"; }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    { "Otro sistema" }
+}
+
 /// Display server session kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
@@ -57,6 +69,10 @@ pub fn detect_session_kind() -> SessionKind {
 
 /// Queries the X11 root screen dimensions in physical pixels.
 pub fn query_x11_virtual_bounds() -> Option<(f32, f32, f32, f32)> {
+    #[cfg(not(target_os = "linux"))]
+    { return None; }
+    #[cfg(target_os = "linux")]
+    {
     use x11rb::connection::Connection;
     let (conn, screen_num) = x11rb::connect(None).ok()?;
     let screen = conn.setup().roots.get(screen_num)?;
@@ -66,6 +82,7 @@ pub fn query_x11_virtual_bounds() -> Option<(f32, f32, f32, f32)> {
         f32::from(screen.width_in_pixels),
         f32::from(screen.height_in_pixels),
     ))
+    }
 }
 
 /// Computes the current monitor's logical bounds in egui points, accounting for
@@ -153,6 +170,28 @@ pub fn detect_current_monitor(
 pub fn spawn_global_cursor_tracker() -> Arc<Mutex<Option<(i16, i16)>>> {
     let pos = Arc::new(Mutex::new(None));
     let pos_clone = Arc::clone(&pos);
+
+    #[cfg(target_os = "windows")]
+    {
+        std::thread::spawn(move || {
+            use windows::Win32::Foundation::POINT;
+            use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+            loop {
+                let mut point = POINT::default();
+                if unsafe { GetCursorPos(&mut point) }.is_ok() {
+                    if let Ok(mut guard) = pos_clone.lock() {
+                        *guard = Some((
+                            point.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                            point.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                        ));
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(33));
+            }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
     std::thread::spawn(move || {
         use x11rb::connection::Connection;
         use x11rb::protocol::xproto::ConnectionExt;
@@ -172,6 +211,9 @@ pub fn spawn_global_cursor_tracker() -> Arc<Mutex<Option<(i16, i16)>>> {
             std::thread::sleep(std::time::Duration::from_millis(33));
         }
     });
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let _ = pos_clone;
     pos
 }
 
@@ -179,6 +221,10 @@ pub fn spawn_global_cursor_tracker() -> Arc<Mutex<Option<(i16, i16)>>> {
 /// `xdg-shell` does not expose always-on-top to clients. Sync a KWin window rule
 /// asynchronously so KWin keeps Rusty-Desk above other windows when requested.
 pub fn apply_platform_always_on_top(enabled: bool) {
+    #[cfg(not(target_os = "linux"))]
+    { let _ = enabled; return; }
+    #[cfg(target_os = "linux")]
+    {
     let is_wayland = std::env::var("XDG_SESSION_TYPE")
         .map(|v| v.eq_ignore_ascii_case("wayland"))
         .unwrap_or(false)
@@ -231,6 +277,7 @@ pub fn apply_platform_always_on_top(enabled: bool) {
             .args(["org.kde.KWin", "/KWin", "reconfigure"])
             .status();
     });
+    }
 }
 
 pub fn merge_kwin_rules_list(existing: &str, rule_id: &str) -> String {
@@ -249,6 +296,14 @@ pub fn merge_kwin_rules_list(existing: &str, rule_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_label_matches_target() {
+        #[cfg(target_os = "windows")]
+        assert_eq!(host_os_label(), "Windows");
+        #[cfg(target_os = "linux")]
+        assert_eq!(host_os_label(), "Linux");
+    }
 
     #[test]
     fn resolve_monitor_rect_respects_hidpi_and_multi_monitor() {

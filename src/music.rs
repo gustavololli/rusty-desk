@@ -132,6 +132,15 @@ pub fn parse_m3u_file(path: &Path) -> Result<(String, Vec<M3uTrack>), String> {
 
 /// Opens a native Linux file picker (`kdialog` or `zenity`) for `.m3u`/`.m3u8` files.
 pub fn pick_m3u_file_dialog() -> Result<Option<PathBuf>, String> {
+    #[cfg(windows)]
+    {
+        return Ok(rfd::FileDialog::new()
+            .set_title("Seleccionar playlist")
+            .add_filter("Playlists", &["m3u", "m3u8"])
+            .pick_file());
+    }
+    #[cfg(not(windows))]
+    {
     if let Ok(out) = Command::new("kdialog")
         .args([
             "--getopenfilename",
@@ -167,6 +176,7 @@ pub fn pick_m3u_file_dialog() -> Result<Option<PathBuf>, String> {
     }
 
     Err("No se encontró kdialog ni zenity para abrir el selector de archivos.".to_string())
+    }
 }
 
 /// Abstraction for applying live volume and mute state to an active player process.
@@ -218,6 +228,55 @@ impl VolumeBackend for PactlVolumeBackend {
             applied_any |= vol_ok && mute_ok;
         }
         applied_any
+    }
+}
+
+/// Adjusts only the external player's Windows audio session, not master volume.
+#[cfg(windows)]
+#[derive(Debug, Default)]
+pub struct WindowsVolumeBackend;
+
+#[cfg(windows)]
+impl VolumeBackend for WindowsVolumeBackend {
+    fn apply_pid_volume(&self, pid: u32, volume_pct: u8, muted: bool) -> bool {
+        use windows::core::Interface;
+        use windows::Win32::Media::Audio::{
+            eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2,
+            IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+        };
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+
+        // All COM interfaces remain inside this worker thread.
+        unsafe {
+            if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
+                return false;
+            }
+            struct UninitCom;
+            impl Drop for UninitCom {
+                fn drop(&mut self) { unsafe { CoUninitialize(); } }
+            }
+            let _com = UninitCom;
+            let apply = || -> windows::core::Result<bool> {
+                let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+                let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
+                let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
+                let sessions = manager.GetSessionEnumerator()?;
+                let mut matched = false;
+                for i in 0..sessions.GetCount()? {
+                    let session = sessions.GetSession(i)?;
+                    let info: IAudioSessionControl2 = session.cast()?;
+                    if info.GetProcessId()? != pid { continue; }
+                    let control: ISimpleAudioVolume = session.cast()?;
+                    control.SetMasterVolume(volume_pct.min(100) as f32 / 100.0, std::ptr::null())?;
+                    control.SetMute(muted, std::ptr::null())?;
+                    matched = true;
+                }
+                Ok(matched)
+            };
+            apply().unwrap_or(false)
+        }
     }
 }
 
@@ -302,6 +361,9 @@ pub struct MusicPlayer {
 
 impl Default for MusicPlayer {
     fn default() -> Self {
+        #[cfg(windows)]
+        { return Self::with_backend(Arc::new(WindowsVolumeBackend)); }
+        #[cfg(not(windows))]
         Self::with_backend(Arc::new(PactlVolumeBackend))
     }
 }
@@ -484,18 +546,30 @@ impl MusicPlayer {
             return Ok(());
         }
 
-        Err("No se encontró un reproductor compatible (ffplay, gst-play-1.0 o mpg123).".to_string())
+        #[cfg(windows)]
+        { Err("No se encontró ffplay. Instalá FFmpeg y agregá ffplay.exe al PATH para reproducir música en Windows.".to_string()) }
+        #[cfg(not(windows))]
+        { Err("No se encontró un reproductor compatible (ffplay, gst-play-1.0 o mpg123).".to_string()) }
     }
 
     pub fn pause(&mut self) {
         if self.paused {
             return;
         }
+        #[cfg(windows)]
+        {
+            // ffplay's Linux SIGSTOP pause mechanism does not exist on Windows.
+            // Never report a paused player while audio is still running.
+            return;
+        }
+        #[cfg(not(windows))]
+        {
         if let Some(pid) = self.child.as_ref().map(Child::id) {
             let _ = Command::new("kill")
                 .args(["-STOP", &pid.to_string()])
                 .status();
             self.paused = true;
+        }
         }
     }
 
@@ -503,12 +577,17 @@ impl MusicPlayer {
         if !self.paused {
             return;
         }
+        #[cfg(windows)]
+        { return; }
+        #[cfg(not(windows))]
+        {
         if let Some(pid) = self.child.as_ref().map(Child::id) {
             let _ = Command::new("kill")
                 .args(["-CONT", &pid.to_string()])
                 .status();
             self.paused = false;
             self.push_worker_target(pid, 4);
+        }
         }
     }
 
@@ -522,6 +601,7 @@ impl MusicPlayer {
 
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
+            #[cfg(not(windows))]
             if self.paused {
                 let _ = Command::new("kill")
                     .args(["-CONT", &child.id().to_string()])

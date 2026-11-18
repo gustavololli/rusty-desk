@@ -109,6 +109,25 @@ impl ActiveRecording {
 /// Best-effort local TTS playback using system speech synthesizer if available.
 pub fn speak_local_async(text: String) {
     std::thread::spawn(move || {
+        #[cfg(windows)]
+        {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+            // The spoken text goes through stdin, never interpolated into PowerShell code.
+            let script = "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak([Console]::In.ReadToEnd())";
+            if let Ok(mut child) = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+            {
+                if let Some(mut input) = child.stdin.take() {
+                    let _ = input.write_all(text.as_bytes());
+                }
+                let _ = child.wait();
+            }
+            return;
+        }
+        #[cfg(not(windows))]
+        {
         for bin in ["espeak-ng", "espeak", "spd-say"] {
             let args: Vec<&str> = if bin == "spd-say" {
                 vec![&text]
@@ -119,6 +138,7 @@ pub fn speak_local_async(text: String) {
                 let _ = child.wait();
                 break;
             }
+        }
         }
     });
 }

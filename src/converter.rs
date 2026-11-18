@@ -143,6 +143,13 @@ pub fn convert_file_to_markdown(path: &Path) -> Result<String, String> {
 }
 
 fn extract_pdf_with_pdftotext(path: &Path) -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        let _ = path;
+        return Err("No se pudo extraer el PDF con MarkItDown. El fallback 'pdftotext' todavía no está disponible en Windows.".to_string());
+    }
+    #[cfg(not(windows))]
+    {
     let output = Command::new("pdftotext")
         .arg("-layout")
         .arg(path)
@@ -174,6 +181,7 @@ fn extract_pdf_with_pdftotext(path: &Path) -> Result<String, String> {
         .and_then(|n| n.to_str())
         .unwrap_or("Documento PDF");
     Ok(format!("# {title}\n\n{text}\n"))
+    }
 }
 
 /// Saves converted Markdown next to the source file as `<stem>.md` (or `<stem>.converted.md` if source is already `.md`).
@@ -204,6 +212,16 @@ pub fn save_markdown_beside(source_path: &Path, markdown: &str) -> Result<PathBu
 
 /// Opens a native Linux file picker (`zenity` or `kdialog`) and returns selected file paths.
 pub fn pick_files_dialog() -> Result<Vec<PathBuf>, String> {
+    #[cfg(windows)]
+    {
+        return Ok(rfd::FileDialog::new()
+            .set_title("Seleccionar archivos para Rusty")
+            .pick_files()
+            .unwrap_or_default());
+    }
+
+    #[cfg(not(windows))]
+    {
     if let Ok(output) = Command::new("zenity")
         .args([
             "--file-selection",
@@ -245,6 +263,7 @@ pub fn pick_files_dialog() -> Result<Vec<PathBuf>, String> {
     }
 
     Err("No se encontró 'zenity' ni 'kdialog' para abrir el selector de archivos. Podés arrastrar y soltar el archivo directamente.".to_string())
+    }
 }
 
 #[cfg(test)]
