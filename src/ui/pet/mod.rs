@@ -170,4 +170,45 @@ mod tests {
         let glitch_frame = ctrl.tick(0.05, AssistantMood::Idle, &cfg);
         assert_eq!(glitch_frame.eye, EyeExpression::Dizzy);
     }
+
+    #[test]
+    fn elapsed_advances_and_blink_reaches_the_closed_sprite_frame() {
+        use crate::ui::sprites::select_frame;
+
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig::default();
+        let first = ctrl.tick(0.25, AssistantMood::Idle, &cfg);
+        assert_eq!(first.state, AnimationState::Idle);
+        assert_eq!(first.elapsed_ms, 250);
+
+        let mut saw_blink = false;
+        let mut saw_closed = false;
+        for _ in 0..80 {
+            let frame = ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+            if frame.state == AnimationState::Blink {
+                saw_blink = true;
+                let index =
+                    select_frame(frame.elapsed_ms as f32 / 1000.0, 8.0, 4, false, frame.state);
+                if index == 1 || index == 2 {
+                    saw_closed = true;
+                }
+            }
+        }
+        assert!(saw_blink, "idle Rusty should blink");
+        assert!(saw_closed, "the blink must reach a closed-eye sprite frame");
+    }
+
+    #[test]
+    fn reduced_motion_does_not_start_a_blink() {
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig {
+            reduce_animations: true,
+            ..PetConfig::default()
+        };
+        for _ in 0..80 {
+            let frame = ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+            assert_ne!(frame.state, AnimationState::Blink);
+            assert_eq!(frame.bob_px, 0);
+        }
+    }
 }

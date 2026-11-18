@@ -1,3 +1,4 @@
+use crate::ui::retro::{paint_pixel_bevel, pixel_button_layout, shade, IVORY, MUTED};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,8 @@ pub enum PixelIcon {
     Stop,
     VolumeOn,
     VolumeMuted,
+    Pet,
+    Expand,
 }
 
 impl PixelIcon {
@@ -200,6 +203,16 @@ impl PixelIcon {
                 0b00010000, 0b00110101, 0b11110010, 0b11110101, 0b11110000, 0b00110000, 0b00010000,
                 0b00000000,
             ],
+            // Small robot head: Rusty's silhouette
+            Self::Pet => [
+                0b00111100, 0b01000010, 0b10100101, 0b10000001, 0b10111101, 0b01000010, 0b00111100,
+                0b00000000,
+            ],
+            // Four corner arrows
+            Self::Expand => [
+                0b11000011, 0b10000001, 0b00000000, 0b00011000, 0b00011000, 0b00000000, 0b10000001,
+                0b11000011,
+            ],
         }
     }
 }
@@ -223,7 +236,8 @@ pub fn paint_pixel_icon(painter: &egui::Painter, rect: Rect, icon: PixelIcon, co
     }
 }
 
-/// Draws a clickable button with a crisp 8-bit icon and optional text label.
+/// Draws a console-style button. Icon-only buttons still need a tooltip so the
+/// action stays obvious. Keyboard focus draws a gold outline.
 pub fn pixel_button(
     ui: &mut egui::Ui,
     icon: PixelIcon,
@@ -232,51 +246,62 @@ pub fn pixel_button(
     text_color: Color32,
     tooltip: &str,
 ) -> egui::Response {
-    let icon_size = 11.0;
-    let font_id = egui::FontId::proportional(11.5);
+    let enabled = ui.is_enabled();
+    let font_id = egui::FontId::monospace(12.0);
     let galley = if label.is_empty() {
         None
     } else {
-        Some(
-            ui.painter()
-                .layout_no_wrap(label.to_string(), font_id, text_color),
-        )
+        Some(ui.painter().layout_no_wrap(
+            label.to_string(),
+            font_id,
+            if enabled { text_color } else { MUTED },
+        ))
     };
-
     let text_w = galley.as_ref().map_or(0.0, |g| g.size().x);
-    let gap = if label.is_empty() { 0.0 } else { 5.0 };
-    let pad_x = 8.0;
-    let height = 24.0;
-    let width = pad_x * 2.0 + icon_size + gap + text_w;
+    let layout = pixel_button_layout(text_w, !label.is_empty());
 
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(layout.width, layout.height), Sense::click());
+    let pressed = enabled && resp.is_pointer_button_down_on();
+    let hovered = enabled && resp.hovered();
+    let focused = enabled && resp.has_focus();
     if ui.is_rect_visible(rect) {
-        let bg = if resp.hovered() {
-            Color32::from_rgb(
-                fill.r().saturating_add(18),
-                fill.g().saturating_add(18),
-                fill.b().saturating_add(18),
-            )
+        let bg = if !enabled {
+            shade(fill, -28)
+        } else if pressed {
+            shade(fill, -24)
+        } else if hovered {
+            shade(fill, 16)
         } else {
             fill
         };
-        ui.painter().rect_filled(rect, 4.0, bg);
-
+        paint_pixel_bevel(ui.painter(), rect, bg, hovered, pressed, focused, enabled);
+        let shift = if pressed {
+            Vec2::new(1.0, 1.0)
+        } else {
+            Vec2::ZERO
+        };
+        let icon_color = if enabled { text_color } else { MUTED };
         let icon_rect = Rect::from_min_size(
-            Pos2::new(rect.min.x + pad_x, rect.center().y - icon_size * 0.5),
-            Vec2::splat(icon_size),
+            Pos2::new(
+                rect.min.x + layout.pad_x + shift.x,
+                rect.center().y - layout.icon_size * 0.5 + shift.y,
+            ),
+            Vec2::splat(layout.icon_size),
         );
-        paint_pixel_icon(ui.painter(), icon_rect, icon, text_color);
-
+        paint_pixel_icon(ui.painter(), icon_rect, icon, icon_color);
         if let Some(g) = galley {
-            let text_pos = Pos2::new(icon_rect.max.x + gap, rect.center().y - g.size().y * 0.5);
-            ui.painter().galley(text_pos, g, text_color);
+            let text_pos = Pos2::new(
+                icon_rect.max.x + layout.gap,
+                rect.center().y - g.size().y * 0.5 + shift.y,
+            );
+            ui.painter().galley(text_pos, g, icon_color);
         }
     }
 
     if tooltip.is_empty() {
         resp
     } else {
-        resp.on_hover_text(RichText::new(tooltip).size(11.5))
+        resp.on_hover_text(RichText::new(tooltip).size(12.0).color(IVORY))
     }
 }

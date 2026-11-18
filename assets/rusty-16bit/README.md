@@ -29,13 +29,15 @@ No llama a servicios de IA ni necesita API keys. Las imágenes PNG tienen
 resolución **nativa** 96 × 96; al dibujarlas desde egui se recomienda usar
 `TextureOptions::NEAREST` para conservar el pixelado.
 
-## Integración futura
+## Integración
 
-Este commit agrega **assets únicamente**. No modifica la apariencia actual
-del avatar ni el motor de animaciones para que se pueda comparar con calma.
-`AnimationController` puede seguir decidiendo el estado y el renderizador
-podría elegir el frame correspondiente en el manifiesto.
+Este pack es el avatar de Rusty Desk. `AnimationController` elige el estado
+y `src/ui/sprites.rs` elige el frame de la sprite sheet (8 FPS, filtro
+nearest). No hace falta volver a generar los PNG para compilar: el sheet
+está embebido en el binario.
 
-El pack es un primer prototipo visual: vale la pena verlo a los tamaños
-reales del modo mascota (64 / 80 / 104 px) antes de decidir si reemplaza
-al Rusty esférico.
+Para regenerar los PNG, el GIF y el manifest:
+
+```bash
+node tools/generate_rusty_sprites.mjs
+```

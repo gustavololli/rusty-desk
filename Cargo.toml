@@ -20,3 +20,4 @@ async-trait = "0.1"
 x11rb = "0.13"
 markitdown = "0.1.11"
 rusqlite = { version = "0.32", features = ["bundled"] }
+png = "0.18"
