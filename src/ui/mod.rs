@@ -1383,7 +1383,7 @@ impl RustyDeskApp {
 
     fn island_expanded_size(&self, music_active: bool) -> [f32; 2] {
         if music_active {
-            [440.0, 174.0]
+            [440.0, 154.0]
         } else {
             [440.0, 76.0]
         }
@@ -3639,6 +3639,51 @@ impl RustyDeskApp {
         let title = self.current_music_title();
         let has_multiple = self.music_tracks.len() > 1;
         let is_paused = self.music_player.is_paused();
+
+        if compact_island {
+            // Keep the island music controls on two predictable rows:
+            // track + transport, then volume. No wrapping or offscreen buttons.
+            ui.horizontal(|ui| {
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
+                paint_pixel_icon(ui.painter(), icon_rect, PixelIcon::MusicNote, accent);
+                let transport_width = if has_multiple { 182.0 } else { 100.0 };
+                let title_width = (ui.available_width() - transport_width).max(60.0);
+                ui.add_sized(
+                    [title_width, 30.0],
+                    egui::Label::new(RichText::new(&title).size(11.5).color(Color32::WHITE))
+                        .truncate(),
+                ).on_hover_text(&title);
+                if has_multiple && pixel_button(
+                    ui, PixelIcon::PrevTrack, "", BUTTON, IVORY, "Pista anterior",
+                ).clicked() {
+                    self.play_prev_music_track();
+                }
+                // Windows cannot pause the external player yet: keep the button disabled.
+                if ui.add_enabled_ui(!cfg!(windows), |ui| pixel_button(
+                    ui,
+                    if is_paused { PixelIcon::Play } else { PixelIcon::Pause },
+                    "", BUTTON, IVORY,
+                    if is_paused { "Reanudar" } else { "Pausar" },
+                )).inner.clicked() {
+                    self.music_player.toggle_pause();
+                }
+                if pixel_button(
+                    ui, PixelIcon::Stop, "", retro::DANGER, IVORY, "Detener música",
+                ).clicked() {
+                    self.stop_music();
+                }
+                if has_multiple && pixel_button(
+                    ui, PixelIcon::NextTrack, "", BUTTON, IVORY, "Siguiente pista",
+                ).clicked() {
+                    self.play_next_music_track_manual();
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                self.render_volume_controls(ui, 185.0, true);
+            });
+            return;
+        }
 
         ui.vertical(|ui| {
             ui.vertical(|ui| {
