@@ -15,6 +15,8 @@ pub const BORDER_DARK: Color32 = Color32::from_rgb(6, 10, 20);
 pub const GOLD: Color32 = Color32::from_rgb(242, 160, 21);
 pub const GOLD_LIGHT: Color32 = Color32::from_rgb(255, 219, 97);
 pub const GOLD_DARK: Color32 = Color32::from_rgb(170, 87, 7);
+pub const OXIDE_DARK: Color32 = Color32::from_rgb(110, 49, 31);
+pub const OXIDE_COPPER: Color32 = Color32::from_rgb(185, 91, 42);
 pub const CYAN: Color32 = Color32::from_rgb(58, 232, 247);
 pub const EMERALD: Color32 = Color32::from_rgb(52, 211, 153);
 pub const ERROR: Color32 = Color32::from_rgb(229, 105, 115);
@@ -61,9 +63,38 @@ pub fn console_frame(horizontal: f32, vertical: f32) -> egui::Frame {
             NIGHT.b(),
             248,
         ))
-        .stroke(Stroke::new(2.0_f32, BORDER))
+        .stroke(Stroke::new(2.0_f32, OXIDE_DARK))
         .rounding(egui::Rounding::ZERO)
         .inner_margin(egui::Margin::symmetric(horizontal, vertical))
+}
+
+/// Decorative 16-bit oxidized bezel shared by the main window, island and notch.
+/// The strokes stay inside `rect`, so the actual viewport size is unchanged.
+pub fn paint_oxidized_bezel(painter: &egui::Painter, rect: Rect) {
+    if rect.width() < 12.0 || rect.height() < 12.0 {
+        return;
+    }
+    for (inset, color) in [
+        (0.5, OXIDE_DARK),
+        (1.5, OXIDE_COPPER),
+        (2.5, GOLD_DARK),
+    ] {
+        painter.rect_stroke(rect.shrink(inset), 0.0, Stroke::new(1.0, color));
+    }
+
+    // A handful of uneven corner pixels; avoid repeated patterns along edges.
+    for (x, y, color) in [
+        (rect.left() + 4.0, rect.top() + 1.0, GOLD_LIGHT),
+        (rect.right() - 6.0, rect.top() + 1.0, OXIDE_DARK),
+        (rect.left() + 1.0, rect.bottom() - 6.0, OXIDE_COPPER),
+        (rect.right() - 4.0, rect.bottom() - 4.0, GOLD_DARK),
+    ] {
+        painter.rect_filled(
+            Rect::from_min_size(Pos2::new(x, y), Vec2::splat(2.0)),
+            0.0,
+            color,
+        );
+    }
 }
 
 pub fn paint_pixel_bevel(
