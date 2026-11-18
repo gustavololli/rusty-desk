@@ -541,7 +541,7 @@ impl AiProvider for GoogleGeminiProvider {
         // quota/rate limit, not evidence that the model is overloaded.
         let overload_fallback = self.model == "gemini-flash-latest";
         let models: Vec<&str> = if overload_fallback {
-            vec![self.model.as_str(), "gemini-2.5-flash"]
+            vec![self.model.as_str(), "gemini-3.5-flash-lite"]
         } else {
             vec![self.model.as_str()]
         };
@@ -582,8 +582,8 @@ impl AiProvider for GoogleGeminiProvider {
                     continue;
                 }
                 if last_status.as_u16() == 503 && model_index == 0 && overload_fallback {
-                    eprintln!("Gemini Flash latest saturado (503); probando gemini-2.5-flash");
-                    break; // try Flash stable with the same API key
+                    eprintln!("Gemini Flash latest saturado (503); probando gemini-3.5-flash-lite");
+                    break; // try the current Flash-Lite alternative with the same API key
                 }
                 anyhow::bail!("Error de Gemini ({last_status}) en {model}: {text}");
             }
@@ -819,7 +819,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gemini_overload_falls_back_to_stable_flash() {
+    async fn gemini_overload_falls_back_to_flash_lite() {
         let overloaded = r#"{"error":{"status":"UNAVAILABLE"}}"#.to_string();
         let base_url = spawn_mock_http_server(vec![
             (503, overloaded.clone()),
