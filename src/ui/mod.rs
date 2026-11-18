@@ -2162,7 +2162,7 @@ impl RustyDeskApp {
                     );
                     ui.add_space(4.0);
                     ui.allocate_ui_with_layout(
-                        Vec2::new((ui.available_width() - 166.0).max(90.0), 48.0),
+                        Vec2::new((ui.available_width() - 206.0).max(90.0), 48.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                         let pomo_active = self.data.pomodoro.phase != PomodoroPhase::Idle;
@@ -2190,7 +2190,9 @@ impl RustyDeskApp {
                         ui.add(egui::Label::new(
                             RichText::new(title_line).strong().size(13.0).color(Color32::WHITE),
                         ).truncate());
-                        let sub = if pomo_active {
+                        let sub = if pomo_active && !self.data.pomodoro.running {
+                            "Enfoque pausado".to_string()
+                        } else if pomo_active {
                             if let Some(t) = self.data.active_task_display_title() {
                                 truncate_chars(&t, 26)
                             } else if self.data.pomodoro.phase == PomodoroPhase::Break {
@@ -2257,7 +2259,7 @@ impl RustyDeskApp {
                         if pixel_button(
                             ui,
                             p_icon,
-                            "",
+                            "Foco",
                             accent,
                             Color32::from_rgb(15, 20, 32),
                             p_tip,
