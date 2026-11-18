@@ -6,7 +6,7 @@ pub mod renderer;
 
 pub use animation::{AnimationController, AnimationFrame};
 pub use behavior::PetBehavior;
-pub use events::{PetEvent, WindowMode};
+pub use events::{EmptySection, PetEvent, WindowMode};
 pub use renderer::PetRenderer;
 
 #[cfg(test)]
@@ -104,6 +104,35 @@ mod tests {
         ctrl.tick(0.1, AssistantMood::Idle, &cfg);
         ctrl.on_event(PetEvent::UserClicked, &cfg, AssistantMood::Idle);
         assert_eq!(ctrl.state(), AnimationState::Happy);
+    }
+
+    #[test]
+    fn empty_section_gives_a_brief_curious_glance() {
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig::default();
+        ctrl.on_event(PetEvent::SectionEmpty(EmptySection::Tasks), &cfg, AssistantMood::Idle);
+        let frame = ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        assert_eq!(frame.state, AnimationState::LookAround);
+        assert_eq!(frame.particle, ParticleKind::Question);
+        assert!(frame.motion.gaze_x > 0.0);
+        for _ in 0..20 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        assert_eq!(ctrl.state(), AnimationState::Idle);
+        let normal = ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        assert_ne!(normal.particle, ParticleKind::Question);
+    }
+
+    #[test]
+    fn empty_section_does_not_interrupt_a_busy_rusty_or_disabled_animations() {
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig::default();
+        ctrl.on_event(PetEvent::AiThinking, &cfg, AssistantMood::Thinking);
+        ctrl.on_event(PetEvent::SectionEmpty(EmptySection::Habits), &cfg, AssistantMood::Thinking);
+        assert_eq!(ctrl.state(), AnimationState::Thinking);
+
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig { auto_animations: false, ..PetConfig::default() };
+        ctrl.on_event(PetEvent::SectionEmpty(EmptySection::Music), &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Idle);
     }
 
     #[test]

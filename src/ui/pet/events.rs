@@ -40,6 +40,18 @@ pub enum PetEvent {
     ModeChanged(WindowMode),
     IdleTimeout,
     CuriosityTrigger,
+    SectionEmpty(EmptySection),
+}
+
+/// Only sections with a meaningful empty state; settings/focus aren't "empty".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptySection {
+    Tasks,
+    Habits,
+    Music,
+    Chat,
+    Markdown,
+    Organizer,
 }
 
 impl PetEvent {
@@ -60,7 +72,7 @@ impl PetEvent {
             | Self::ModeChanged(_)
             | Self::UserDragged
             | Self::UserHovered => EventPriority::Normal,
-            Self::IdleTimeout | Self::CuriosityTrigger => EventPriority::Low,
+            Self::IdleTimeout | Self::CuriosityTrigger | Self::SectionEmpty(_) => EventPriority::Low,
         }
     }
 }

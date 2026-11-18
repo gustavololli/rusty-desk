@@ -1,7 +1,7 @@
 use crate::config::{PetConfig, PetIntensity};
 use crate::state::AssistantMood;
 
-use super::events::{EventPriority, PetEvent};
+use super::events::{EmptySection, EventPriority, PetEvent};
 use super::motion::{MotionController, MotionPose};
 
 /// High-level procedural animation states for Rusty.
@@ -99,6 +99,7 @@ pub struct AnimationController {
     motion_pose: MotionPose,
     click_streak: u8,
     last_click_time: f32,
+    empty_section_reaction: Option<EmptySection>,
 }
 
 impl Default for AnimationController {
@@ -119,6 +120,7 @@ impl Default for AnimationController {
             motion_pose: MotionPose::default(),
             click_streak: 0,
             last_click_time: -10.0,
+            empty_section_reaction: None,
         }
     }
 }
@@ -163,6 +165,7 @@ impl AnimationController {
     }
 
     fn transition(&mut self, next: AnimationState, priority: EventPriority, duration: Option<f32>) {
+        self.empty_section_reaction = None;
         self.state = next;
         self.priority = priority;
         self.state_elapsed = 0.0;
@@ -299,6 +302,17 @@ impl AnimationController {
                     self.transition(AnimationState::LookAround, EventPriority::Low, Some(1.3));
                 }
             }
+            PetEvent::SectionEmpty(section) => {
+                // React once when the user visits a genuinely empty section.
+                // Never override speaking, error, Pomodoro or other active states.
+                if self.state == AnimationState::Idle && config.auto_animations {
+                    let right = matches!(section, EmptySection::Tasks | EmptySection::Music);
+                    self.look_dir_x = if right { 1 } else { -1 };
+                    if !config.reduce_animations { self.motion.notice(right); }
+                    self.transition(AnimationState::LookAround, EventPriority::Low, Some(1.8));
+                    self.empty_section_reaction = Some(section);
+                }
+            }
             PetEvent::ModeChanged(_) => {
                 if self.state == AnimationState::Sleep {
                     self.transition(AnimationState::WakeUp, EventPriority::Normal, Some(0.65));
@@ -401,6 +415,9 @@ impl AnimationController {
                 frame.eye = EyeExpression::Curious;
                 frame.look_override_x = Some(self.look_dir_x);
                 frame.look_override_y = Some(0);
+                if self.empty_section_reaction.is_some() && !reduced {
+                    frame.particle = ParticleKind::Question;
+                }
             }
             AnimationState::Sleep => {
                 frame.bob_px = 0;

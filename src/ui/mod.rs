@@ -37,7 +37,7 @@ use crate::ui::avatar::draw_rusty;
 use crate::ui::icons8bit::{paint_pixel_icon, pixel_button, PixelIcon};
 use crate::ui::island::{IslandInput, IslandStateMachine, IslandVisibility};
 use crate::ui::pet::{
-    AnimationController, AnimationFrame, PetBehavior, PetEvent, PetRenderer, WindowMode,
+    AnimationController, AnimationFrame, EmptySection, PetBehavior, PetEvent, PetRenderer, WindowMode,
 };
 use crate::voice::{speak_local_async, ActiveRecording};
 use eframe::egui::{self, Color32, Pos2, RichText, Rounding, Stroke, Vec2};
@@ -116,6 +116,8 @@ pub struct RustyDeskApp {
     window_mode: WindowMode,
     always_on_top: bool,
     active_tab: ActiveTab,
+    last_section_visit: Option<ActiveTab>,
+    last_section_empty: Option<EmptySection>,
     mood: AssistantMood,
     pet_controller: AnimationController,
     pet_behavior: PetBehavior,
@@ -268,6 +270,8 @@ impl RustyDeskApp {
             window_mode: initial_mode,
             always_on_top,
             active_tab: ActiveTab::Chat,
+            last_section_visit: None,
+            last_section_empty: None,
             mood: initial_mood,
             pet_controller: AnimationController::default(),
             pet_behavior: PetBehavior::new(0.0),
@@ -1248,6 +1252,39 @@ impl RustyDeskApp {
             .on_event(event, &self.config.pet, self.mood);
     }
 
+    /// A one-shot glance when entering an empty area. No repeated animation
+    /// while staying on the tab, and no inference from unrelated sections.
+    fn observe_empty_section(&mut self) {
+        if self.window_mode != WindowMode::Expanded {
+            self.last_section_visit = None;
+            self.last_section_empty = None;
+            return;
+        }
+        let entering = self.last_section_visit != Some(self.active_tab);
+        self.last_section_visit = Some(self.active_tab);
+
+        let empty = match self.active_tab {
+            ActiveTab::Tasks if self.data.tasks.is_empty() => Some(EmptySection::Tasks),
+            ActiveTab::Habits if self.data.habits.is_empty() => Some(EmptySection::Habits),
+            ActiveTab::Music if self.data.playlists.is_empty()
+                || (self.music_selected_playlist_id.is_some() && self.music_tracks.is_empty()) => {
+                Some(EmptySection::Music)
+            }
+            ActiveTab::Chat if self.chat_ui.len() <= 1 => Some(EmptySection::Chat),
+            ActiveTab::Markdown if self.md_source_path.is_none() && self.md_output.is_empty() => {
+                Some(EmptySection::Markdown)
+            }
+            // Focus without a timer is normal; Organizer reacts only after an
+            // explicit successful Preview; Settings is not user content.
+            _ => None,
+        };
+        let became_empty = empty.is_some() && self.last_section_empty != empty;
+        self.last_section_empty = empty;
+        if (entering || became_empty) && !self.is_thinking && !self.md_is_converting {
+            if let Some(section) = empty { self.emit_pet_event(PetEvent::SectionEmpty(section)); }
+        }
+    }
+
     fn emit_pet_event_for_tool(&mut self, tool_name: &str, status: &ToolStatus) {
         if *status == ToolStatus::Error {
             self.emit_pet_event(PetEvent::ErrorOccurred);
@@ -1464,6 +1501,7 @@ impl eframe::App for RustyDeskApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_bg_events(ctx);
+        self.observe_empty_section();
         self.handle_dropped_files(ctx);
         self.tick_pomodoro(ctx);
         if self.music_player.poll_finished() {
@@ -3954,6 +3992,9 @@ impl RustyDeskApp {
                         self.organizer.last_preview.len()
                     )
                 });
+                if out.status != ToolStatus::Error && self.organizer.last_preview.is_empty() {
+                    self.emit_pet_event(PetEvent::SectionEmpty(EmptySection::Organizer));
+                }
             }
 
             if pixel_button(

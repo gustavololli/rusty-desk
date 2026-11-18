@@ -24,6 +24,13 @@ PNG existentes. No se añade ningún servicio externo.
   toque, sin contar ese toque como una molestia.
 - El clic simple ya no cambia de modo: **doble clic para abrir Isla**;
   el menú contextual con clic derecho sigue ofreciendo Isla y asistente.
+- Al entrar en una sección realmente vacía (Tareas, Hábitos, Música, Chat
+  nuevo, Markdown sin documento), Rusty hace **una** mirada curiosa y muestra
+  una interrogación. No repite el gesto en cada frame; respeta la opción
+  `auto_animations` y no interrumpe una reacción más importante.
+- Organizador: solo reacciona al **resultado exitoso** de `Previsualizar`
+  cuando no hay archivos. Focus sin temporizador y Settings no se interpretan
+  erróneamente como pantallas vacías.
 
 ## Limitación visual conocida
 
