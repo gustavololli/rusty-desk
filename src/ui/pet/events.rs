@@ -29,6 +29,7 @@ pub enum PetEvent {
     AiReplyReady,
     AiError,
     TaskCompleted,
+    AllTasksCompleted,
     HabitCompleted,
     PomodoroStarted,
     PomodoroPaused,
@@ -40,6 +41,8 @@ pub enum PetEvent {
     ModeChanged(WindowMode),
     IdleTimeout,
     CuriosityTrigger,
+    LongWorkSession,
+    UserReturned,
     SectionEmpty(EmptySection),
 }
 
@@ -60,6 +63,7 @@ impl PetEvent {
         match self {
             Self::PomodoroFinished | Self::ErrorOccurred | Self::AiError => EventPriority::Critical,
             Self::TaskCompleted
+            | Self::AllTasksCompleted
             | Self::HabitCompleted
             | Self::AiReplyReady
             | Self::MarkdownConverted
@@ -72,7 +76,9 @@ impl PetEvent {
             | Self::ModeChanged(_)
             | Self::UserDragged
             | Self::UserHovered => EventPriority::Normal,
-            Self::IdleTimeout | Self::CuriosityTrigger | Self::SectionEmpty(_) => EventPriority::Low,
+            Self::UserReturned => EventPriority::Normal,
+            Self::IdleTimeout | Self::CuriosityTrigger | Self::SectionEmpty(_)
+            | Self::LongWorkSession => EventPriority::Low,
         }
     }
 }

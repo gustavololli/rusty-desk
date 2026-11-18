@@ -100,6 +100,8 @@ pub struct AnimationController {
     click_streak: u8,
     last_click_time: f32,
     empty_section_reaction: Option<EmptySection>,
+    teased_glance_pending: bool,
+    teased_until: f32,
 }
 
 impl Default for AnimationController {
@@ -121,6 +123,8 @@ impl Default for AnimationController {
             click_streak: 0,
             last_click_time: -10.0,
             empty_section_reaction: None,
+            teased_glance_pending: false,
+            teased_until: 0.0,
         }
     }
 }
@@ -206,6 +210,8 @@ impl AnimationController {
                     self.last_click_time = self.total_time;
                     if self.click_streak >= 6 {
                         // Frown / indignant reaction, then automatic recovery.
+                        self.teased_glance_pending = true;
+                        self.teased_until = self.total_time + 12.0;
                         self.transition(AnimationState::Error, EventPriority::High, Some(1.45));
                     } else if self.click_streak >= 3 {
                         // Laughter-like celebration with smile and sparkles.
@@ -253,6 +259,13 @@ impl AnimationController {
                         EventPriority::High,
                         Some(2.0 * intensity_scale),
                     );
+                } else {
+                    self.transition(AnimationState::Happy, EventPriority::High, Some(1.2));
+                }
+            }
+            PetEvent::AllTasksCompleted => {
+                if config.celebrate_tasks {
+                    self.transition(AnimationState::Celebrate, EventPriority::High, Some(2.8 * intensity_scale));
                 } else {
                     self.transition(AnimationState::Happy, EventPriority::High, Some(1.2));
                 }
@@ -313,6 +326,21 @@ impl AnimationController {
                     self.empty_section_reaction = Some(section);
                 }
             }
+            PetEvent::LongWorkSession => {
+                // Brief sleepy expression, never stop or change the Pomodoro.
+                if config.auto_animations && self.state == AnimationState::Focused {
+                    self.transition(AnimationState::Sleep, EventPriority::Low, Some(1.8));
+                }
+            }
+            PetEvent::UserReturned => {
+                if config.auto_animations {
+                    if self.state == AnimationState::Sleep {
+                        self.transition(AnimationState::WakeUp, EventPriority::Normal, Some(0.8));
+                    } else if self.state == AnimationState::Idle {
+                        self.transition(AnimationState::Happy, EventPriority::Normal, Some(1.1));
+                    }
+                }
+            }
             PetEvent::ModeChanged(_) => {
                 if self.state == AnimationState::Sleep {
                     self.transition(AnimationState::WakeUp, EventPriority::Normal, Some(0.65));
@@ -353,6 +381,20 @@ impl AnimationController {
                     let recovery = Self::base_state_for_mood(mood);
                     self.transition(recovery, EventPriority::Low, None);
                 }
+            }
+        }
+
+        // One slightly suspicious sideways glance after the annoyed expression
+        // has ended. The tiny memory expires, and other work always wins.
+        if self.teased_glance_pending {
+            if self.total_time >= self.teased_until {
+                self.teased_glance_pending = false;
+            } else if self.state == AnimationState::Idle && self.state_duration.is_none()
+                && config.auto_animations && !config.reduce_animations {
+                self.look_dir_x = -2;
+                self.motion.notice(false);
+                self.transition(AnimationState::LookAround, EventPriority::Low, Some(1.35));
+                self.teased_glance_pending = false;
             }
         }
 

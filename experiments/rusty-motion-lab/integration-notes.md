@@ -31,6 +31,16 @@ PNG existentes. No se añade ningún servicio externo.
 - Organizador: solo reacciona al **resultado exitoso** de `Previsualizar`
   cuando no hay archivos. Focus sin temporizador y Settings no se interpretan
   erróneamente como pantallas vacías.
+- Memoria emocional **en RAM, de corta duración**:
+  - Completar todas las tareas pendientes produce una celebración algo más larga.
+  - En un bloque Pomodoro de **20 minutos o más** muestra una expresión de
+    cansancio una sola vez por sesión, sin pausar ni modificar el temporizador.
+  - Si pasan **5 minutos sin interacción** y el usuario vuelve a mover el ratón,
+    pulsar una tecla o hacer clic **dentro de la aplicación**, Rusty lo saluda
+    o despierta. No se usa seguimiento global del sistema.
+  - Tras seis clics rápidos aparece el fastidio habitual y, después de
+    recuperarse, **una mirada de reojo** si no expiraron 12 segundos.
+  - La celebración de fin de Pomodoro ya existía; se conserva sin duplicarla.
 
 ## Limitación visual conocida
 

@@ -37,7 +37,8 @@ use crate::ui::avatar::draw_rusty;
 use crate::ui::icons8bit::{paint_pixel_icon, pixel_button, PixelIcon};
 use crate::ui::island::{IslandInput, IslandStateMachine, IslandVisibility};
 use crate::ui::pet::{
-    AnimationController, AnimationFrame, EmptySection, PetBehavior, PetEvent, PetRenderer, WindowMode,
+    AnimationController, AnimationFrame, EmptySection, PetBehavior, PetEvent, PetPresence,
+    PetRenderer, WindowMode,
 };
 use crate::voice::{speak_local_async, ActiveRecording};
 use eframe::egui::{self, Color32, Pos2, RichText, Rounding, Stroke, Vec2};
@@ -121,6 +122,7 @@ pub struct RustyDeskApp {
     mood: AssistantMood,
     pet_controller: AnimationController,
     pet_behavior: PetBehavior,
+    pet_presence: PetPresence,
     pet_drag_origin: Option<Pos2>,
     pet_dragging: bool,
     last_frame_time: f64,
@@ -275,6 +277,7 @@ impl RustyDeskApp {
             mood: initial_mood,
             pet_controller: AnimationController::default(),
             pet_behavior: PetBehavior::new(0.0),
+            pet_presence: PetPresence::default(),
             pet_drag_origin: None,
             pet_dragging: false,
             last_frame_time: 0.0,
@@ -1516,12 +1519,38 @@ impl eframe::App for RustyDeskApp {
         };
         self.last_frame_time = time;
 
+        // Detect return from inactivity using only UI input delivered to Rusty.
+        // No global keyboard listener, operating-system monitor or service.
+        let user_active = ctx.input(|i| {
+            i.pointer.any_pressed() || i.pointer.delta().length_sq() > 9.0
+                || i.events.iter().any(|event| matches!(event,
+                    egui::Event::Key { pressed: true, .. } | egui::Event::Text(_)))
+        });
+        if user_active {
+            if let Some(event) = self.pet_presence.on_input(time) {
+                self.emit_pet_event(event);
+            }
+            self.pet_behavior.record_activity(time);
+        }
+
+        let focus_session = if self.data.pomodoro.running
+            && self.data.pomodoro.phase == PomodoroPhase::Work {
+            self.data.pomodoro.active_session_id.as_deref()
+        } else { None };
+        let work_elapsed = self.data.pomodoro.work_minutes.saturating_mul(60)
+            .saturating_sub(self.data.pomodoro.remaining_secs);
+        if let Some(event) = self.pet_presence.on_focus(focus_session, work_elapsed) {
+            self.emit_pet_event(event);
+        }
+
         self.current_monitor = detect_current_monitor(ctx, self.screen_bounds);
 
         let music_active = self.music_player.is_active();
         let music_playing = self.music_player.is_playing();
         let ai_busy = self.is_thinking || self.md_is_converting;
-        let is_busy = ai_busy || self.active_recording.is_some() || music_playing;
+        // An active Pomodoro is intentional focus, not inactivity/sleep.
+        let is_busy = ai_busy || self.active_recording.is_some() || music_playing
+            || self.data.pomodoro.running;
         // Local chat composition and model generation are the only writing cues.
         // No global keyboard hooks or inspection of other applications.
         self.pet_controller.set_writing(
@@ -2889,7 +2918,11 @@ impl RustyDeskApp {
         }
         if let Some(t) = toggled_task {
             if t.done {
-                self.emit_pet_event(PetEvent::TaskCompleted);
+                if !self.data.tasks.is_empty() && self.data.tasks.iter().all(|task| task.done) {
+                    self.emit_pet_event(PetEvent::AllTasksCompleted);
+                } else {
+                    self.emit_pet_event(PetEvent::TaskCompleted);
+                }
             }
             let r = self.data.upsert_task(&t);
             self.report_persistence_result(r);
