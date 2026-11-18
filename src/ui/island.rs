@@ -279,7 +279,7 @@ impl IslandStateMachine {
             || input.has_open_menu
             || input.is_recording
             || input.pointer_in_island
-            || (input.music_active && input.keep_visible_during_playback)
+            // Background music must not pin the island open when auto-hide is enabled.
             || (input.ai_busy && input.keep_visible_during_ai)
     }
 
@@ -350,7 +350,6 @@ impl IslandStateMachine {
                 let wake_for_activity = !input.auto_hide
                     || !can_auto_hide
                     || input.is_recording
-                    || (input.music_active && input.keep_visible_during_playback)
                     || (input.ai_busy && input.keep_visible_during_ai);
                 let wake_for_hover = input.show_on_hover && input.pointer_in_tab;
                 if wake_for_activity || wake_for_hover {
@@ -515,11 +514,14 @@ mod tests {
         sm.step(&drag, IslandPosition::Right, mon, 12.0, None, size);
         assert_eq!(sm.visibility, IslandVisibility::Visible);
 
-        // Music playback keeps visible when configured
+        // Playing music does not override the user's auto-hide preference.
         let mut music = base_input(10.0);
         music.music_active = true;
         sm.step(&music, IslandPosition::Right, mon, 12.0, None, size);
         assert_eq!(sm.visibility, IslandVisibility::Visible);
+        music.now = 10.3;
+        sm.step(&music, IslandPosition::Right, mon, 12.0, None, size);
+        assert_eq!(sm.visibility, IslandVisibility::WaitingToHide);
 
         // Open menu / interacting button keeps visible
         let mut menu = base_input(11.0);

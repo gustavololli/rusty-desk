@@ -5153,10 +5153,6 @@ impl RustyDeskApp {
                 "Mostrar al acercar el mouse",
             );
             ui.checkbox(
-                &mut self.config.island_keep_visible_during_playback,
-                "Mantener visible durante reproducción",
-            );
-            ui.checkbox(
                 &mut self.config.island_keep_visible_during_ai,
                 "Mantener visible durante operación de IA",
             );
