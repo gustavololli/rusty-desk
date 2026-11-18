@@ -175,6 +175,7 @@ pub struct RustyDeskApp {
     music_current_track_idx: Option<usize>,
     music_status: Option<String>,
     music_show_add: bool,
+    island_music_open: bool,
     island_sm: IslandStateMachine,
     island_dragging: bool,
     current_monitor: MonitorRect,
@@ -328,6 +329,7 @@ impl RustyDeskApp {
             music_current_track_idx: None,
             music_status: None,
             music_show_add: false,
+            island_music_open: false,
             island_sm: IslandStateMachine::default(),
             island_dragging: false,
             current_monitor,
@@ -1383,7 +1385,7 @@ impl RustyDeskApp {
 
     fn island_expanded_size(&self, music_active: bool) -> [f32; 2] {
         if music_active {
-            [440.0, 154.0]
+            [440.0, if self.island_music_open { 190.0 } else { 110.0 }]
         } else {
             [440.0, 76.0]
         }
@@ -2251,15 +2253,15 @@ impl RustyDeskApp {
                         self.set_window_mode(ctx, WindowMode::Expanded);
                     }
                     if self.data.pomodoro.phase != PomodoroPhase::Idle {
-                        let (p_icon, p_tip) = if self.data.pomodoro.running {
-                            (PixelIcon::Pause, "Pausar Pomodoro")
+                        let (p_label, p_tip) = if self.data.pomodoro.running {
+                            ("Foco II", "Pausar Pomodoro")
                         } else {
-                            (PixelIcon::Play, "Reanudar Pomodoro")
+                            ("Foco ▶", "Reanudar Pomodoro")
                         };
                         if pixel_button(
                             ui,
-                            p_icon,
-                            "Foco",
+                            PixelIcon::Focus,
+                            p_label,
                             accent,
                             Color32::from_rgb(15, 20, 32),
                             p_tip,
@@ -2304,7 +2306,25 @@ impl RustyDeskApp {
 
             if music_active {
                 ui.add_space(4.0);
-                self.render_music_mini_controls(ui, accent, true);
+                if pixel_button(
+                    ui,
+                    PixelIcon::MusicNote,
+                    if self.island_music_open { "Ocultar música" } else { "Mostrar música" },
+                    BUTTON,
+                    IVORY,
+                    if self.island_music_open {
+                        "Plegar controles del reproductor"
+                    } else {
+                        "Desplegar canción y controles de música"
+                    },
+                ).clicked() {
+                    self.island_music_open = !self.island_music_open;
+                    self.island_sm.invalidate_geometry();
+                }
+                if self.island_music_open {
+                    ui.add_space(2.0);
+                    self.render_music_mini_controls(ui, accent, true);
+                }
             }
         });
     }
@@ -3650,11 +3670,26 @@ impl RustyDeskApp {
                 paint_pixel_icon(ui.painter(), icon_rect, PixelIcon::MusicNote, accent);
                 let transport_width = if has_multiple { 182.0 } else { 100.0 };
                 let title_width = (ui.available_width() - transport_width).max(60.0);
-                ui.add_sized(
-                    [title_width, 30.0],
-                    egui::Label::new(RichText::new(&title).size(11.5).color(Color32::WHITE))
-                        .truncate(),
-                ).on_hover_text(&title);
+                let (title_rect, title_response) = ui.allocate_exact_size(
+                    Vec2::new(title_width, 30.0), egui::Sense::hover(),
+                );
+                let font = egui::FontId::monospace(11.5);
+                let galley = ui.painter().layout_no_wrap(title.clone(), font, Color32::WHITE);
+                let text_width = galley.size().x;
+                let x = if text_width > title_rect.width() && !self.config.pet.reduce_animations {
+                    // Retro marquee: enter from the left, exit right, repeat without changing layout.
+                    let travel = title_rect.width() + text_width + 12.0;
+                    let elapsed = ui.ctx().input(|i| i.time) as f32;
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                    title_rect.min.x - text_width + (elapsed * 34.0).rem_euclid(travel)
+                } else {
+                    title_rect.min.x
+                };
+                let y = title_rect.center().y - galley.size().y * 0.5;
+                ui.painter().with_clip_rect(title_rect).galley(
+                    Pos2::new(x, y), galley, Color32::WHITE,
+                );
+                title_response.on_hover_text(&title);
                 if has_multiple && pixel_button(
                     ui, PixelIcon::PrevTrack, "", BUTTON, IVORY, "Pista anterior",
                 ).clicked() {
