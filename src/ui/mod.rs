@@ -1743,13 +1743,14 @@ impl eframe::App for RustyDeskApp {
                 .show(ctx, |ui| {
                     let island_frame = console_frame(12.0, 8.0);
 
-                    island_frame.show(ui, |ui| {
+                    let framed = island_frame.show(ui, |ui| {
                         ui.set_min_size(ui.available_size());
                         let controls_enabled = out.visibility != IslandVisibility::Hiding;
                         ui.add_enabled_ui(controls_enabled, |ui| {
                             self.render_compact_island(ui, ctx, pointer_pos, accent, &pet_frame);
                         });
                     });
+                    retro::paint_oxidized_bezel(ui.painter(), framed.response.rect);
                 });
             return;
         }
@@ -1764,7 +1765,7 @@ impl eframe::App for RustyDeskApp {
             .show(ctx, |ui| {
                 let island_frame = console_frame(14.0, 10.0);
 
-                island_frame.show(ui, |ui| {
+                let framed = island_frame.show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
 
                     if self.window_mode == WindowMode::Island {
@@ -2021,6 +2022,7 @@ impl eframe::App for RustyDeskApp {
                     }
                     }
                 });
+                retro::paint_oxidized_bezel(ui.painter(), framed.response.rect);
             });
     }
 }
@@ -2167,31 +2169,13 @@ impl RustyDeskApp {
         let painter = ui.painter();
         // Pixel-wide oxidized-metal bands frame the hidden notch without
         // changing the tiny viewport size or its auto-hide hit area.
-        let outer = avail.shrink(0.5);
-        let copper = Color32::from_rgb(139, 65, 35);
-        let rust = Color32::from_rgb(185, 91, 42);
-        painter.rect_filled(outer, 0.0, copper);
-        painter.rect_filled(outer.shrink(1.0), 0.0, rust);
-        painter.rect_filled(outer.shrink(2.0), 0.0, retro::GOLD_DARK);
-        let interior = outer.shrink(3.0);
+        let interior = avail.shrink(3.0);
         painter.rect_filled(
             interior,
             0.0,
             Color32::from_rgba_unmultiplied(NIGHT.r(), NIGHT.g(), NIGHT.b(), 245),
         );
-        if outer.width() > 14.0 && outer.height() > 10.0 {
-            let mark = |x: f32, y: f32, color: Color32| {
-                painter.rect_filled(
-                    egui::Rect::from_min_size(Pos2::new(x, y), Vec2::splat(2.0)),
-                    0.0,
-                    color,
-                );
-            };
-            mark(outer.left() + 3.0, outer.top() + 1.0, retro::GOLD_LIGHT);
-            mark(outer.right() - 5.0, outer.top() + 1.0, copper);
-            mark(outer.left() + 1.0, outer.bottom() - 5.0, rust);
-            mark(outer.right() - 4.0, outer.bottom() - 4.0, retro::GOLD_DARK);
-        }
+        retro::paint_oxidized_bezel(painter, avail);
         let sprite_area = interior.shrink(2.0);
         let side = crate::ui::sprites::display_side(
             sprite_area.width().min(sprite_area.height()),
