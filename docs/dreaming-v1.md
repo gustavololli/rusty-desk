@@ -9,7 +9,7 @@ Branch: `feature/rusty-dreaming-v1`. No cloud backend or deployment required.
 - Remote conversation transfer requires an explicit separate checkbox; remote
   endpoints must use HTTPS. A local endpoint does not require an API key.
 - Every two minutes (when no conversational request is pending), or manually,
-  process up to 16 unprocessed text messages using the selected Dreaming model.
+  process up to 8 unprocessed text messages (max 2,000 characters each) using the selected Dreaming model.
 - Persist short model-proposed facts and a processing checkpoint in SQLite.
   Checkpoint advances only after valid JSON and a committed transaction.
 - Retrieve up to five keyword-related memories and add them as **untrusted data**
@@ -35,6 +35,8 @@ Branch: `feature/rusty-dreaming-v1`. No cloud backend or deployment required.
   modify the animation event bus.
 - If the model returns malformed JSON or the connection fails, the batch remains
   pending; manual retries are possible. A later batch processes the next messages.
+- OpenAI-compatible Dreaming requests wait up to 180 seconds to accommodate
+  local inference on modest hardware; the normal chat timeout remains 30 seconds.
 - Deleting a conversation does not currently cascade into extracted memories;
   delete unwanted memories explicitly in Settings → Memoria.
 - Models may be instructed to output `{"memories":[]}` when nothing is worth saving.

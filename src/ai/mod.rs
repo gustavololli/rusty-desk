@@ -113,8 +113,15 @@ pub struct OpenAiCompatibleProvider {
 
 impl OpenAiCompatibleProvider {
     pub fn new(base_url: String, api_key: String, model: String, stt_model: String) -> Self {
+        Self::new_with_timeout(base_url, api_key, model, stt_model, 30)
+    }
+
+    /// Dreaming can take much longer than a normal interactive chat on local CPUs.
+    pub fn new_with_timeout(
+        base_url: String, api_key: String, model: String, stt_model: String, timeout_secs: u64,
+    ) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .unwrap_or_default();
         Self {
