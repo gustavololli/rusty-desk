@@ -2165,14 +2165,39 @@ impl RustyDeskApp {
     ) {
         let avail = ui.available_rect_before_wrap();
         let painter = ui.painter();
+        // Pixel-wide oxidized-metal bands frame the hidden notch without
+        // changing the tiny viewport size or its auto-hide hit area.
+        let outer = avail.shrink(0.5);
+        let copper = Color32::from_rgb(139, 65, 35);
+        let rust = Color32::from_rgb(185, 91, 42);
+        painter.rect_filled(outer, 0.0, copper);
+        painter.rect_filled(outer.shrink(1.0), 0.0, rust);
+        painter.rect_filled(outer.shrink(2.0), 0.0, retro::GOLD_DARK);
+        let interior = outer.shrink(3.0);
         painter.rect_filled(
-            avail,
+            interior,
             0.0,
             Color32::from_rgba_unmultiplied(NIGHT.r(), NIGHT.g(), NIGHT.b(), 245),
         );
-        painter.rect_stroke(avail, 0.0, Stroke::new(2.0_f32, retro::GOLD));
-        let side = crate::ui::sprites::display_side(avail.width().min(avail.height()), 96.0);
-        let sprite = egui::Rect::from_center_size(avail.center(), Vec2::splat(side));
+        if outer.width() > 14.0 && outer.height() > 10.0 {
+            let mark = |x: f32, y: f32, color: Color32| {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(Pos2::new(x, y), Vec2::splat(2.0)),
+                    0.0,
+                    color,
+                );
+            };
+            mark(outer.left() + 3.0, outer.top() + 1.0, retro::GOLD_LIGHT);
+            mark(outer.right() - 5.0, outer.top() + 1.0, copper);
+            mark(outer.left() + 1.0, outer.bottom() - 5.0, rust);
+            mark(outer.right() - 4.0, outer.bottom() - 4.0, retro::GOLD_DARK);
+        }
+        let sprite_area = interior.shrink(2.0);
+        let side = crate::ui::sprites::display_side(
+            sprite_area.width().min(sprite_area.height()),
+            96.0,
+        );
+        let sprite = egui::Rect::from_center_size(sprite_area.center(), Vec2::splat(side));
         crate::ui::sprites::paint_rusty(painter, sprite, ui.ctx(), frame, reduce, None);
     }
 
