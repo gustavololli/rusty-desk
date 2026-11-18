@@ -308,6 +308,29 @@ impl Default for ExternalToolsConfig {
 
 /// Configuration for the AI provider and assistant preferences.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_dreaming_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model: String,
+    /// Separate permission: conversation history must not leave this device implicitly.
+    #[serde(default)]
+    pub allow_remote: bool,
+}
+
+fn default_dreaming_url() -> String { "http://localhost:1234/v1".into() }
+
+impl Default for DreamingConfig {
+    fn default() -> Self {
+        Self { enabled: false, base_url: default_dreaming_url(), api_key: String::new(), model: String::new(), allow_remote: false }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub assistant_name: String,
     pub base_url: String,
@@ -350,6 +373,8 @@ pub struct AppConfig {
     pub audio_muted: bool,
     #[serde(default)]
     pub external_tools: ExternalToolsConfig,
+    #[serde(default)]
+    pub dreaming: DreamingConfig,
 }
 
 fn default_true() -> bool {
@@ -402,6 +427,7 @@ impl Default for AppConfig {
             audio_volume: default_audio_volume(),
             audio_muted: false,
             external_tools: ExternalToolsConfig::default(),
+            dreaming: DreamingConfig::default(),
         }
     }
 }

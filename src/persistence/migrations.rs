@@ -207,6 +207,23 @@ const MIGRATIONS: &[Migration] = &[
             ON external_tool_usage(provider_id, period_key);
     "#,
     },
+    Migration {
+        version: 5,
+        name: "0005_dreaming_memories",
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS dreaming_memories (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL UNIQUE,
+            source_message_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS dreaming_state (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            last_message_rowid INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO dreaming_state(id, last_message_rowid) VALUES (1, 0);
+        "#,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> anyhow::Result<()> {

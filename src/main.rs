@@ -1,6 +1,7 @@
 mod ai;
 mod config;
 mod converter;
+mod dreaming;
 mod free_tools;
 mod music;
 mod organizer;
