@@ -1,6 +1,7 @@
 pub mod animation;
 pub mod behavior;
 pub mod events;
+pub mod motion;
 pub mod renderer;
 
 pub use animation::{AnimationController, AnimationFrame};
@@ -112,6 +113,21 @@ mod tests {
         assert_ne!(WindowMode::Island, WindowMode::Pet);
         assert_ne!(WindowMode::Expanded, WindowMode::Pet);
         assert_eq!(WindowMode::default(), WindowMode::Expanded);
+    }
+
+    #[test]
+    fn writing_cue_reaches_sprite_frame_without_replacing_state() {
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig::default();
+        ctrl.set_writing(true, false);
+        let mut frame = ctrl.tick(1.0 / 60.0, AssistantMood::Idle, &cfg);
+        for _ in 0..75 { frame = ctrl.tick(1.0 / 60.0, AssistantMood::Idle, &cfg); }
+        assert_eq!(frame.state, AnimationState::Idle);
+        assert!(frame.motion.gaze_y > 0.8);
+        assert!(frame.motion.y > 1.0);
+        ctrl.set_writing(false, false);
+        for _ in 0..75 { frame = ctrl.tick(1.0 / 60.0, AssistantMood::Idle, &cfg); }
+        assert!(frame.motion.gaze_y.abs() < 0.15);
     }
 
     #[test]

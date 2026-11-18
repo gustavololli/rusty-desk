@@ -2,6 +2,7 @@ use crate::config::{PetConfig, PetIntensity};
 use crate::state::AssistantMood;
 
 use super::events::{EventPriority, PetEvent};
+use super::motion::{MotionController, MotionPose};
 
 /// High-level procedural animation states for Rusty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,7 +60,7 @@ pub enum ParticleKind {
 }
 
 /// Output of one quantized animation tick consumed by the pixel renderer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnimationFrame {
     pub state: AnimationState,
     pub bob_px: i32,
@@ -77,6 +78,7 @@ pub struct AnimationFrame {
     pub headphones: bool,
     /// Milliseconds already spent in `state`. The sprite renderer picks a frame from this.
     pub elapsed_ms: u32,
+    pub motion: MotionPose,
 }
 
 /// Procedural 8-bit animation state machine. Runs 100% locally with zero allocations.
@@ -93,6 +95,8 @@ pub struct AnimationController {
     look_dir_x: i32,
     rng_state: u32,
     is_playing_music: bool,
+    motion: MotionController,
+    motion_pose: MotionPose,
 }
 
 impl Default for AnimationController {
@@ -109,11 +113,17 @@ impl Default for AnimationController {
             look_dir_x: 1,
             rng_state: 0x5A17_93E1,
             is_playing_music: false,
+            motion: MotionController::default(),
+            motion_pose: MotionPose::default(),
         }
     }
 }
 
 impl AnimationController {
+    /// User text focus and model generation are separate signals.
+    pub fn set_writing(&mut self, user: bool, model: bool) {
+        self.motion.set_writing(user, model);
+    }
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn state(&self) -> AnimationState {
         self.state
@@ -183,6 +193,7 @@ impl AnimationController {
             PetEvent::UserHovered => {
                 if self.state == AnimationState::Idle {
                     self.look_dir_x = if self.next_rand_unit() > 0.5 { 1 } else { -1 };
+                    self.motion.notice(self.look_dir_x > 0);
                     self.transition(AnimationState::LookAround, EventPriority::Low, Some(0.9));
                 }
             }
@@ -195,6 +206,7 @@ impl AnimationController {
                 self.transition(AnimationState::Thinking, EventPriority::High, None);
             }
             PetEvent::AiReplyReady => {
+                self.motion.prepare_reply();
                 self.transition(
                     AnimationState::Happy,
                     EventPriority::High,
@@ -261,6 +273,7 @@ impl AnimationController {
                     && self.state == AnimationState::Idle
                 {
                     self.look_dir_x = if self.next_rand_unit() > 0.5 { 2 } else { -2 };
+                    self.motion.notice(self.look_dir_x > 0);
                     self.transition(AnimationState::LookAround, EventPriority::Low, Some(1.3));
                 }
             }
@@ -323,6 +336,7 @@ impl AnimationController {
             }
         }
 
+        self.motion_pose = self.motion.tick(dt, self.state, config);
         self.build_frame(config)
     }
 
@@ -353,6 +367,7 @@ impl AnimationController {
             accent_override: None,
             headphones: self.is_playing_music,
             elapsed_ms: (self.state_elapsed.max(0.0) * 1000.0) as u32,
+            motion: self.motion_pose,
         };
 
         match self.state {
@@ -518,7 +533,7 @@ impl AnimationController {
         frame
     }
 
-    /// Repaint cadence for the 8 FPS sprite sheet.
+    /// Spring movement is continuous even though the image states are 8 FPS.
     ///
     /// Steady reduced-motion states do not cycle frames, so they wait longer.
     /// Pointer motion still repaints immediately through egui.
@@ -526,7 +541,7 @@ impl AnimationController {
         if config.reduce_animations && self.state_duration.is_none() {
             400
         } else {
-            125
+            16
         }
     }
 }

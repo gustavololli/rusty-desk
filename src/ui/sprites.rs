@@ -391,7 +391,12 @@ pub fn paint_rusty(
     reduce_animations: bool,
     look_x: Option<f32>,
 ) {
-    let (state, column) = presented_cell(frame.state, frame.elapsed_ms, reduce_animations, look_x);
+    // Animated gaze settles before head rotation; existing look sprites stay intact.
+    let gaze = if !reduce_animations && frame.state == AnimationState::Idle {
+        if frame.motion.gaze_x.abs() > 0.35 { Some(frame.motion.gaze_x) }
+        else { look_x }
+    } else { look_x };
+    let (state, column) = presented_cell(frame.state, frame.elapsed_ms, reduce_animations, gaze);
     let Some(texture) = sheet_texture(ctx) else {
         painter.rect_filled(rect, 0.0, Color32::from_rgb(242, 160, 21));
         return;
@@ -403,12 +408,38 @@ pub fn paint_rusty(
         SHEET_COLUMNS * NATIVE_SIZE,
         SHEET_ROWS * NATIVE_SIZE,
     );
-    painter.image(
-        texture.id(),
-        rect,
-        Rect::from_min_max(Pos2::new(uv[0], uv[1]), Pos2::new(uv[2], uv[3])),
-        Color32::WHITE,
-    );
+    let pose = frame.motion;
+    if reduce_animations || (pose.tilt.abs() < 0.01 && pose.x.abs() < 0.01
+        && pose.y.abs() < 0.01 && (pose.scale_x - 1.0).abs() < 0.001
+        && (pose.scale_y - 1.0).abs() < 0.001) {
+        painter.image(texture.id(), rect,
+            Rect::from_min_max(Pos2::new(uv[0], uv[1]), Pos2::new(uv[2], uv[3])),
+            Color32::WHITE);
+        return;
+    }
+
+    // Rotate the textured quad, not the PNG itself: nearest filtering preserves
+    // the 16-bit pixels and all original state sprite frames remain available.
+    let pixel = rect.width() / NATIVE_SIZE as f32;
+    let center = rect.center() + Vec2::new(pose.x * pixel, pose.y * pixel);
+    let rad = pose.tilt.to_radians();
+    let (sin, cos) = rad.sin_cos();
+    let half = rect.width() * 0.5;
+    let mut mesh = egui::Mesh::with_texture(texture.id());
+    for (sx, sy, u, v) in [(-1.0, -1.0, uv[0], uv[1]),
+        (1.0, -1.0, uv[2], uv[1]),
+        (1.0, 1.0, uv[2], uv[3]),
+        (-1.0, 1.0, uv[0], uv[3])] {
+        let x = sx * half * pose.scale_x;
+        let y = sy * half * pose.scale_y;
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: center + Vec2::new(x * cos - y * sin, x * sin + y * cos),
+            uv: Pos2::new(u, v),
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 pub fn draw_rusty(

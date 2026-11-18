@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rusty Motion Lab · experimento aislado</title>
+  <style>
+    :root { color-scheme: dark; --night: #0a1020; --panel: #162034;
+      --panel-hi: #253650; --gold: #f2a015; --gold-hi: #ffdb61;
+      --ivory: #fff7df; --muted: #b0bcd2; --cyan: #3ae8f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d18; color: var(--ivory);
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .shell { max-width: 1200px; margin: 0 auto; padding: 28px 22px 52px; }
+    header { padding-bottom: 22px; border-bottom: 2px solid var(--panel-hi); }
+    header small { color: var(--cyan); letter-spacing: .18em; }
+    h1 { margin: 6px 0 4px; font-size: clamp(25px, 4vw, 39px); letter-spacing: .02em; }
+    h1 b { color: var(--gold-hi); }
+    .sub { color: var(--muted); margin: 0; max-width: 850px; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, 1fr);
+      gap: 22px; margin-top: 24px; align-items: start; }
+    .frame { padding: 16px; background: var(--panel); border: 3px solid #5a6e91;
+      box-shadow: 5px 5px 0 #04060d; }
+    .stage { position: relative; display: grid; place-items: center;
+      aspect-ratio: 1.15; min-height: 330px; overflow: hidden;
+      background: radial-gradient(circle at center, #243752 0%, #101a2c 63%, #0b1324 100%);
+      border: 2px solid #384e69; cursor: crosshair; }
+    .stage::before { content: ''; position: absolute; inset: 0; pointer-events: none;
+      background-image: linear-gradient(#ffffff07 1px, transparent 1px),
+        linear-gradient(90deg, #ffffff07 1px, transparent 1px);
+      background-size: 24px 24px; }
+    canvas { width: min(84%, 430px); height: auto; aspect-ratio: 1;
+      image-rendering: pixelated; image-rendering: crisp-edges;
+      filter: drop-shadow(0 12px 0 #050a13bb); position: relative; z-index: 1; }
+    .stage-note { position: absolute; bottom: 14px; left: 14px; right: 14px;
+      color: #aab8ca; text-align: center; font-size: 12px; pointer-events: none; }
+    .status-row { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .badge { border: 1px solid #52637d; background: #0e1627; padding: 5px 9px;
+      color: var(--muted); font-size: 12px; }
+    .badge strong { color: var(--gold-hi); }
+    h2 { font-size: 15px; color: var(--gold-hi); margin: 0 0 10px; text-transform: uppercase;
+      letter-spacing: .07em; }
+    .controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    button { font: inherit; border: 2px solid #687fa1; color: var(--ivory);
+      background: #1b2b44; padding: 10px 8px; text-align: left;
+      cursor: pointer; box-shadow: inset 2px 2px 0 #4e6384, 3px 3px 0 #050a12; }
+    button:hover, button:focus-visible { border-color: var(--gold-hi); outline: 0; }
+    button:active { transform: translate(2px, 2px); box-shadow: none; }
+    button[aria-pressed="true"] { color: #101520; background: var(--gold);
+      border-color: var(--gold-hi); box-shadow: inset -2px -2px 0 #aa5707; }
+    .controls button span { opacity: .7; padding-right: 8px; }
+    .right .frame + .frame { margin-top: 18px; }
+    label.toggle { display: flex; align-items: center; gap: 9px; padding: 9px 0;
+      border-bottom: 1px solid #344661; color: var(--ivory); cursor: pointer; }
+    input[type="checkbox"] { accent-color: var(--gold); width: 18px; height: 18px; }
+    input[type="range"] { width: 100%; accent-color: var(--gold); }
+    .range-line { display: flex; justify-content: space-between; margin-top: 12px; }
+    .range-line output { color: var(--cyan); }
+    .hint { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
+    .demo-input { width: 100%; min-height: 78px; resize: vertical; margin-top: 10px;
+      background: #0e1627; border: 2px solid #52637d; color: var(--ivory);
+      padding: 11px; font: inherit; }
+    .demo-input:focus { border-color: var(--cyan); outline: none; }
+    .technical { padding-top: 12px; border-top: 1px solid #384e69; margin-top: 15px;
+      color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+    footer { margin-top: 22px; color: #aab8ca; font-size: 12px; }
+    footer strong { color: var(--gold-hi); }
+    @media (max-width: 850px) { .grid { grid-template-columns: 1fr; }
+      .stage { min-height: 280px; } .shell { padding: 20px 14px; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <small>LABORATORIO LOCAL / ETAPA 03 / SIN INTEGRACIÓN</small>
+      <h1>Rusty <b>Motion Lab</b></h1>
+      <p class="sub">Movimiento de cabeza, ojos independientes y transiciones con inercia.
+        Dibujo procedural de 96×96 píxeles: sin sprite sheet, IA, APIs ni dependencias.</p>
+    </header>
+
+    <div class="grid">
+      <section class="frame">
+        <div class="stage" id="stage" aria-label="Rusty amarillo animado; mové el cursor para que te mire">
+          <canvas id="rusty" width="96" height="96" aria-label="Personaje Rusty en pixel art"></canvas>
+          <div class="stage-note">MOVÉ EL CURSOR · HACÉ CLIC PARA QUE REACCIONE</div>
+        </div>
+        <div class="status-row">
+          <div class="badge">Estado: <strong id="current-state">IDLE</strong></div>
+          <div class="badge">Cabeza: <strong id="current-tilt">0.0°</strong></div>
+          <div class="badge">Mirada: <strong id="current-gaze">0.0 / 0.0</strong></div>
+        </div>
+      </section>
+
+      <aside class="right">
+        <section class="frame">
+          <h2>Expresión / estado</h2>
+          <div class="controls" id="state-buttons">
+            <button type="button" data-state="idle" aria-pressed="true"><span>◇</span>Idle</button>
+            <button type="button" data-state="thinking" aria-pressed="false"><span>?</span>Thinking</button>
+            <button type="button" data-state="listening" aria-pressed="false"><span>♫</span>Listening</button>
+            <button type="button" data-state="focused" aria-pressed="false"><span>⌛</span>Focused</button>
+            <button type="button" data-state="happy" aria-pressed="false"><span>★</span>Happy</button>
+            <button type="button" data-state="error" aria-pressed="false"><span>!</span>Error</button>
+            <button type="button" data-state="sleep" aria-pressed="false"><span>z</span>Sleep</button>
+          </div>
+          <p class="hint">Los cambios de expresión nunca reemplazan una imagen: los resortes
+            interpolan movimiento, posición y apertura de ojos en cada frame.</p>
+        </section>
+
+        <section class="frame">
+          <h2>Ajustar la sensación de vida</h2>
+          <label class="toggle"><input type="checkbox" id="follow" checked>
+            Seguir el cursor con los ojos</label>
+          <label class="toggle"><input type="checkbox" id="reduced">
+            Reducir animaciones</label>
+          <div class="range-line"><label for="spring">Velocidad de reacción</label>
+            <output id="spring-value">3.8 Hz</output></div>
+          <input type="range" id="spring" min="1.4" max="8.0" step="0.2" value="3.8">
+          <div class="range-line"><label for="strength">Intensidad de movimiento</label>
+            <output id="strength-value">100%</output></div>
+          <input type="range" id="strength" min="0" max="160" step="5" value="100">
+          <p class="hint">Dejalo en Idle y esperá: Rusty mira a distintos lados, respira y
+            parpadea con intervalos variables. Nada de loops idénticos.</p>
+          <pre class="technical" id="telemetry">Preparando motor local…</pre>
+        </section>
+
+        <section class="frame">
+          <h2>Ensayar comportamientos</h2>
+          <div class="controls">
+            <button type="button" id="notice-left" title="Rusty escucha algo a su izquierda">◀ Mirar a un lado</button>
+            <button type="button" id="notice-right" title="Rusty escucha algo a su derecha">Mirar a un lado ▶</button>
+            <button type="button" id="respond" title="Vuelve a mirar al usuario antes de responder">◎ Antes de responder</button>
+            <button type="button" id="model-typing" aria-pressed="false" title="Simula que el modelo está redactando">⌨ Modelo escribe</button>
+          </div>
+          <textarea class="demo-input" id="user-writing" placeholder="Escribí acá: Rusty bajará la mirada para leer…" aria-label="Simular texto del usuario"></textarea>
+          <p class="hint">Al escribir acá, Rusty mira hacia abajo. También podés simular
+            al modelo escribiendo. Son eventos de prueba: no se leen otras ventanas.</p>
+          <div class="badge" style="margin-top: 10px">Atención: <strong id="attention">LIBRE</strong></div>
+        </section>
+      </aside>
+    </div>
+
+    <footer><strong>NO INTEGRADO:</strong> este experimento no lee ni modifica los sprites
+      de <code>assets/rusty-16bit/</code> y no afecta a la aplicación Rusty Desk.</footer>
+  </main>
+  <script type="module">
+    import { RustyMotion } from './motion.mjs';
+    import { createRustyRenderer } from './character.mjs';
+    const motion = new RustyMotion();
+    const draw = createRustyRenderer(document.getElementById('rusty'));
+    const stage = document.getElementById('stage');
+    const currentState = document.getElementById('current-state');
+    const currentTilt = document.getElementById('current-tilt');
+    const currentGaze = document.getElementById('current-gaze');
+    const telemetry = document.getElementById('telemetry');
+    const buttons = [...document.querySelectorAll('[data-state]')];
+    const writingBox = document.getElementById('user-writing');
+    const modelTyping = document.getElementById('model-typing');
+    const attention = document.getElementById('attention');
+    function choose(state) {
+      motion.setState(state);
+      buttons.forEach(button => button.setAttribute('aria-pressed', button.dataset.state === state));
+      currentState.textContent = state.toUpperCase();
+    }
+    buttons.forEach(button => button.addEventListener('click', () => choose(button.dataset.state)));
+    stage.addEventListener('pointermove', event => {
+      const r = stage.getBoundingClientRect();
+      motion.setPointer((event.clientX - r.left) / (r.width / 2) - 1,
+        (event.clientY - r.top) / (r.height / 2) - 1);
+    });
+    stage.addEventListener('pointerleave', () => motion.releasePointer());
+    stage.addEventListener('click', () => choose('happy'));
+    document.getElementById('notice-left').addEventListener('click', () => motion.noticeSomething('left'));
+    document.getElementById('notice-right').addEventListener('click', () => motion.noticeSomething('right'));
+    document.getElementById('respond').addEventListener('click', () => {
+      motion.prepareResponse();
+      modelTyping.setAttribute('aria-pressed', 'false');
+    });
+    modelTyping.addEventListener('click', () => {
+      const enabled = !motion.typing.model;
+      motion.setTyping('model', enabled);
+      modelTyping.setAttribute('aria-pressed', String(enabled));
+    });
+    writingBox.addEventListener('focus', () => motion.setTyping('user', true));
+    writingBox.addEventListener('input', () => motion.setTyping('user', true));
+    writingBox.addEventListener('blur', () => motion.setTyping('user', false));
+    document.getElementById('follow').addEventListener('change', event => {
+      motion.followPointer = event.target.checked;
+    });
+    document.getElementById('reduced').addEventListener('change', event => {
+      motion.setReducedMotion(event.target.checked);
+    });
+    document.getElementById('spring').addEventListener('input', event => {
+      motion.springFrequency = Number(event.target.value);
+      document.getElementById('spring-value').textContent = `${motion.springFrequency.toFixed(1)} Hz`;
+    });
+    document.getElementById('strength').addEventListener('input', event => {
+      motion.motionStrength = Number(event.target.value) / 100;
+      document.getElementById('strength-value').textContent = `${event.target.value}%`;
+    });
+    let last = 0;
+    let lastTelemetry = 0;
+    function frame(now) {
+      const dt = last ? Math.min((now - last) / 1000, 0.05) : 1 / 60;
+      last = now;
+      const pose = motion.update(dt);
+      draw(pose);
+      if (now - lastTelemetry > 100) {
+        lastTelemetry = now;
+        currentTilt.textContent = `${pose.tilt.toFixed(1)}°`;
+        currentGaze.textContent = `${pose.leftX.toFixed(1)} / ${pose.rightX.toFixed(1)}`;
+        attention.textContent = motion.typing.user ? 'LEYENDO TU TEXTO'
+          : motion.typing.model ? 'LEYENDO RESPUESTA'
+            : motion.cue?.kind === 'notice' ? 'ALGO LLAMÓ SU ATENCIÓN'
+              : motion.cue?.kind === 'respond' ? 'VUELVE A MIRARTE' : 'LIBRE';
+        telemetry.textContent = `Head Y  ${pose.headY.toFixed(2)} px\n`
+          + `Eye open  ${(pose.eyeOpen * 100).toFixed(0)}%\n`
+          + `Mouth  ${(pose.mouthOpen * 100).toFixed(0)}%\n`
+          + `Motor  local, original, sin sprites`;
+      }
+      requestAnimationFrame(frame);
+    }
+    draw(motion.pose());
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

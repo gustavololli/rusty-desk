@@ -1484,6 +1484,15 @@ impl eframe::App for RustyDeskApp {
         let music_playing = self.music_player.is_playing();
         let ai_busy = self.is_thinking || self.md_is_converting;
         let is_busy = ai_busy || self.active_recording.is_some() || music_playing;
+        // Local chat composition and model generation are the only writing cues.
+        // No global keyboard hooks or inspection of other applications.
+        self.pet_controller.set_writing(
+            self.window_mode == WindowMode::Expanded
+                && self.active_tab == ActiveTab::Chat
+                && !self.chat_input.is_empty()
+                && !self.is_thinking,
+            self.is_thinking,
+        );
         self.pet_controller.set_music_playing(music_playing);
         if let Some(auto_event) = self.pet_behavior.tick(time, is_busy, &self.config.pet) {
             self.pet_controller

@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rusty Motion Lab · experimento aislado</title>
+  <style>
+    :root { color-scheme: dark; --night: #0a1020; --panel: #162034;
+      --panel-hi: #253650; --gold: #f2a015; --gold-hi: #ffdb61;
+      --ivory: #fff7df; --muted: #b0bcd2; --cyan: #3ae8f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #080d18; color: var(--ivory);
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .shell { max-width: 1200px; margin: 0 auto; padding: 28px 22px 52px; }
+    header { padding-bottom: 22px; border-bottom: 2px solid var(--panel-hi); }
+    header small { color: var(--cyan); letter-spacing: .18em; }
+    h1 { margin: 6px 0 4px; font-size: clamp(25px, 4vw, 39px); letter-spacing: .02em; }
+    h1 b { color: var(--gold-hi); }
+    .sub { color: var(--muted); margin: 0; max-width: 850px; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, 1fr);
+      gap: 22px; margin-top: 24px; align-items: start; }
+    .frame { padding: 16px; background: var(--panel); border: 3px solid #5a6e91;
+      box-shadow: 5px 5px 0 #04060d; }
+    .stage { position: relative; display: grid; place-items: center;
+      aspect-ratio: 1.15; min-height: 330px; overflow: hidden;
+      background: radial-gradient(circle at center, #243752 0%, #101a2c 63%, #0b1324 100%);
+      border: 2px solid #384e69; cursor: crosshair; }
+    .stage::before { content: ''; position: absolute; inset: 0; pointer-events: none;
+      background-image: linear-gradient(#ffffff07 1px, transparent 1px),
+        linear-gradient(90deg, #ffffff07 1px, transparent 1px);
+      background-size: 24px 24px; }
+    canvas { width: min(84%, 430px); height: auto; aspect-ratio: 1;
+      image-rendering: pixelated; image-rendering: crisp-edges;
+      filter: drop-shadow(0 12px 0 #050a13bb); position: relative; z-index: 1; }
+    .stage-note { position: absolute; bottom: 14px; left: 14px; right: 14px;
+      color: #aab8ca; text-align: center; font-size: 12px; pointer-events: none; }
+    .status-row { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .badge { border: 1px solid #52637d; background: #0e1627; padding: 5px 9px;
+      color: var(--muted); font-size: 12px; }
+    .badge strong { color: var(--gold-hi); }
+    h2 { font-size: 15px; color: var(--gold-hi); margin: 0 0 10px; text-transform: uppercase;
+      letter-spacing: .07em; }
+    .controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    button { font: inherit; border: 2px solid #687fa1; color: var(--ivory);
+      background: #1b2b44; padding: 10px 8px; text-align: left;
+      cursor: pointer; box-shadow: inset 2px 2px 0 #4e6384, 3px 3px 0 #050a12; }
+    button:hover, button:focus-visible { border-color: var(--gold-hi); outline: 0; }
+    button:active { transform: translate(2px, 2px); box-shadow: none; }
+    button[aria-pressed="true"] { color: #101520; background: var(--gold);
+      border-color: var(--gold-hi); box-shadow: inset -2px -2px 0 #aa5707; }
+    .controls button span { opacity: .7; padding-right: 8px; }
+    .right .frame + .frame { margin-top: 18px; }
+    label.toggle { display: flex; align-items: center; gap: 9px; padding: 9px 0;
+      border-bottom: 1px solid #344661; color: var(--ivory); cursor: pointer; }
+    input[type="checkbox"] { accent-color: var(--gold); width: 18px; height: 18px; }
+    input[type="range"] { width: 100%; accent-color: var(--gold); }
+    .range-line { display: flex; justify-content: space-between; margin-top: 12px; }
+    .range-line output { color: var(--cyan); }
+    .hint { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
+    .demo-input { width: 100%; min-height: 78px; resize: vertical; margin-top: 10px;
+      background: #0e1627; border: 2px solid #52637d; color: var(--ivory);
+      padding: 11px; font: inherit; }
+    .demo-input:focus { border-color: var(--cyan); outline: none; }
+    .technical { padding-top: 12px; border-top: 1px solid #384e69; margin-top: 15px;
+      color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+    footer { margin-top: 22px; color: #aab8ca; font-size: 12px; }
+    footer strong { color: var(--gold-hi); }
+    @media (max-width: 850px) { .grid { grid-template-columns: 1fr; }
+      .stage { min-height: 280px; } .shell { padding: 20px 14px; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <small>LABORATORIO LOCAL / ETAPA 03 / SIN INTEGRACIÓN</small>
+      <h1>Rusty <b>Motion Lab</b></h1>
+      <p class="sub">Movimiento de cabeza, ojos independientes y transiciones con inercia.
+        Dibujo procedural de 96×96 píxeles: sin sprite sheet, IA, APIs ni dependencias.</p>
+    </header>
+
+    <div class="grid">
+      <section class="frame">
+        <div class="stage" id="stage" aria-label="Rusty amarillo animado; mové el cursor para que te mire">
+          <canvas id="rusty" width="96" height="96" aria-label="Personaje Rusty en pixel art"></canvas>
+          <div class="stage-note">MOVÉ EL CURSOR · HACÉ CLIC PARA QUE REACCIONE</div>
+        </div>
+        <div class="status-row">
+          <div class="badge">Estado: <strong id="current-state">IDLE</strong></div>
+          <div class="badge">Cabeza: <strong id="current-tilt">0.0°</strong></div>
+          <div class="badge">Mirada: <strong id="current-gaze">0.0 / 0.0</strong></div>
+        </div>
+      </section>
+
+      <aside class="right">
+        <section class="frame">
+          <h2>Expresión / estado</h2>
+          <div class="controls" id="state-buttons">
+            <button type="button" data-state="idle" aria-pressed="true"><span>◇</span>Idle</button>
+            <button type="button" data-state="thinking" aria-pressed="false"><span>?</span>Thinking</button>
+            <button type="button" data-state="listening" aria-pressed="false"><span>♫</span>Listening</button>
+            <button type="button" data-state="focused" aria-pressed="false"><span>⌛</span>Focused</button>
+            <button type="button" data-state="happy" aria-pressed="false"><span>★</span>Happy</button>
+            <button type="button" data-state="error" aria-pressed="false"><span>!</span>Error</button>
+            <button type="button" data-state="sleep" aria-pressed="false"><span>z</span>Sleep</button>
+          </div>
+          <p class="hint">Los cambios de expresión nunca reemplazan una imagen: los resortes
+            interpolan movimiento, posición y apertura de ojos en cada frame.</p>
+        </section>
+
+        <section class="frame">
+          <h2>Ajustar la sensación de vida</h2>
+          <label class="toggle"><input type="checkbox" id="follow" checked>
+            Seguir el cursor con los ojos</label>
+          <label class="toggle"><input type="checkbox" id="reduced">
+            Reducir animaciones</label>
+          <div class="range-line"><label for="spring">Velocidad de reacción</label>
+            <output id="spring-value">3.8 Hz</output></div>
+          <input type="range" id="spring" min="1.4" max="8.0" step="0.2" value="3.8">
+          <div class="range-line"><label for="strength">Intensidad de movimiento</label>
+            <output id="strength-value">100%</output></div>
+          <input type="range" id="strength" min="0" max="160" step="5" value="100">
+          <p class="hint">Dejalo en Idle y esperá: Rusty mira a distintos lados, respira y
+            parpadea con intervalos variables. Nada de loops idénticos.</p>
+          <pre class="technical" id="telemetry">Preparando motor local…</pre>
+        </section>
+
+        <section class="frame">
+          <h2>Ensayar comportamientos</h2>
+          <div class="controls">
+            <button type="button" id="notice-left" title="Rusty escucha algo a su izquierda">◀ Mirar a un lado</button>
+            <button type="button" id="notice-right" title="Rusty escucha algo a su derecha">Mirar a un lado ▶</button>
+            <button type="button" id="respond" title="Vuelve a mirar al usuario antes de responder">◎ Antes de responder</button>
+            <button type="button" id="model-typing" aria-pressed="false" title="Simula que el modelo está redactando">⌨ Modelo escribe</button>
+          </div>
+          <textarea class="demo-input" id="user-writing" placeholder="Escribí acá: Rusty bajará la mirada para leer…" aria-label="Simular texto del usuario"></textarea>
+          <p class="hint">Al escribir acá, Rusty mira hacia abajo. También podés simular
+            al modelo escribiendo. Son eventos de prueba: no se leen otras ventanas.</p>
+          <div class="badge" style="margin-top: 10px">Atención: <strong id="attention">LIBRE</strong></div>
+        </section>
+      </aside>
+    </div>
+
+    <footer><strong>NO INTEGRADO:</strong> este experimento no lee ni modifica los sprites
+      de <code>assets/rusty-16bit/</code> y no afecta a la aplicación Rusty Desk.</footer>
+  </main>
+  <script>
+// A small, original motion experiment inspired by the techniques described for
+// Grok Bot (state choreography, damped springs and living gaze). No sprite assets.
+// Pure JS: portable to Rust, deterministic under a fixed seed and timestep.
+
+const STATES = Object.freeze([
+  'idle', 'thinking', 'listening', 'focused', 'happy', 'error', 'sleep',
+]);
+
+const TAU = Math.PI * 2;
+const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+const smooth = (x) => {
+  const t = clamp(x, 0, 1);
+  return t * t * (3 - 2 * t);
+};
+
+class Spring {
+  constructor(value = 0, frequency = 3.8, damping = 0.82) {
+    this.value = value;
+    this.velocity = 0;
+    this.frequency = frequency;
+    this.damping = damping;
+  }
+
+  step(target, dt) {
+    if (!Number.isFinite(target) || !Number.isFinite(dt) || dt <= 0) return this.value;
+    // Semi-implicit Euler at fixed substeps. Overshoot is intentional.
+    const omega = TAU * this.frequency;
+    const accel = omega * omega * (target - this.value)
+      - 2 * this.damping * omega * this.velocity;
+    this.velocity += accel * dt;
+    this.value += this.velocity * dt;
+    return this.value;
+  }
+
+  snap(target) {
+    this.value = target;
+    this.velocity = 0;
+  }
+}
+
+function randomGenerator(seed) {
+  let state = seed >>> 0 || 0x51f1a11;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 4294967296;
+  };
+}
+
+class RustyMotion {
+  constructor({ seed = 0x16b175, reducedMotion = false } = {}) {
+    this.random = randomGenerator(seed);
+    this.time = 0;
+    this.state = 'idle';
+    this.stateTime = 0;
+    this.reducedMotion = reducedMotion;
+    this.followPointer = true;
+    this.pointer = { x: 0, y: 0, until: 0 };
+    this.wander = { x: 0, y: 0 };
+    this.nextWander = 2.0;
+    this.nextBlink = 2.8;
+    this.blinkTime = -1;
+    this.doubleBlinkQueued = false;
+    this.reactionTime = 0;
+    this.typing = { user: false, model: false };
+    this.cue = null;
+    this.motionStrength = 1;
+    this.springFrequency = 3.8;
+    this.values = Object.fromEntries([
+      'headX', 'headY', 'tilt', 'scaleX', 'scaleY',
+      'leftX', 'leftY', 'rightX', 'rightY', 'eyeNarrow', 'mouthOpen',
+    ].map((name) => [name, new Spring(name.startsWith('scale') ? 1 : 0)]));
+  }
+
+  setState(next) {
+    if (!STATES.includes(next)) throw new Error(`Unknown motion state: ${next}`);
+    if (this.state === next) return;
+    this.state = next;
+    this.stateTime = 0;
+    this.reactionTime = 0;
+    if (next === 'happy' || next === 'error') this.reactionTime = 0.001;
+  }
+
+  setPointer(x, y) {
+    this.pointer.x = clamp(Number.isFinite(x) ? x : 0, -1, 1);
+    this.pointer.y = clamp(Number.isFinite(y) ? y : 0, -1, 1);
+    this.pointer.until = this.time + 1.9;
+  }
+
+  releasePointer() {
+    this.pointer.until = this.time + 0.85;
+  }
+
+  /** Hook for future UI events. The lab does not monitor external applications. */
+  setTyping(source, active) {
+    if (source !== 'user' && source !== 'model') throw new Error(`Unknown writer: ${source}`);
+    this.typing[source] = Boolean(active);
+    if (active) this.cue = null;
+  }
+
+  /** A brief, spontaneous-looking distraction; eyes lead the head. */
+  noticeSomething(side = 'right') {
+    if (side !== 'left' && side !== 'right') throw new Error(`Unknown side: ${side}`);
+    this.cue = { kind: 'notice', start: this.time, direction: side === 'right' ? 1 : -1 };
+  }
+
+  /** Look back at the person before speaking, then gently settle. */
+  prepareResponse() {
+    this.typing.model = false;
+    this.cue = { kind: 'respond', start: this.time, direction: 0 };
+  }
+
+  setReducedMotion(value) {
+    this.reducedMotion = Boolean(value);
+    if (this.reducedMotion) {
+      this.blinkTime = -1;
+      this.wander = { x: 0, y: 0 };
+    }
+  }
+
+  /** Time is supplied by the caller; no wall-clock, external service or timer. */
+  update(dt) {
+    dt = clamp(Number.isFinite(dt) ? dt : 0, 0, 0.1);
+    if (dt === 0) return this.pose();
+    const steps = Math.ceil(dt * 120);
+    const sub = dt / steps;
+    for (let i = 0; i < steps; i++) this.step(sub);
+    return this.pose();
+  }
+
+  step(dt) {
+    this.time += dt;
+    this.stateTime += dt;
+    const reduced = this.reducedMotion;
+    const strength = this.motionStrength;
+    const wandering = this.state === 'idle' && !reduced;
+    const following = this.followPointer && this.time < this.pointer.until && !reduced;
+    const writing = this.typing.user || this.typing.model;
+
+    if (wandering && this.time >= this.nextWander) {
+      this.wander.x = (this.random() * 2 - 1) * 0.72;
+      this.wander.y = (this.random() * 2 - 1) * 0.36;
+      this.nextWander = this.time + 2.4 + this.random() * 3.5;
+    }
+    if (!reduced && this.time >= this.nextBlink && this.blinkTime < 0) {
+      this.blinkTime = 0;
+      this.doubleBlinkQueued = this.random() < 0.12;
+      this.nextBlink = this.time + 2.9 + this.random() * 3.8;
+    }
+    if (this.blinkTime >= 0) {
+      this.blinkTime += dt;
+      if (this.blinkTime >= 0.205) {
+        if (this.doubleBlinkQueued) {
+          this.blinkTime = -0.11; // short pause before a second blink
+          this.doubleBlinkQueued = false;
+        } else {
+          this.blinkTime = -1;
+        }
+      }
+    } else if (this.blinkTime > -1 && this.blinkTime < 0) {
+      this.blinkTime += dt;
+      if (this.blinkTime >= 0) this.blinkTime = 0;
+    }
+
+    let gazeX = following ? this.pointer.x : wandering ? this.wander.x : 0;
+    let gazeY = following ? this.pointer.y : wandering ? this.wander.y : 0;
+    let tilt = following ? gazeX * 2.3 : 0;
+    let headX = following ? gazeX * 0.8 : 0;
+    let headY = 0;
+    let scaleX = 1;
+    let scaleY = 1;
+    let eyeNarrow = 0;
+    let mouthOpen = 0;
+    switch (this.state) {
+      case 'thinking':
+        gazeX = 0.65; gazeY = -0.83; tilt = -4.5;
+        headY = -1.1; eyeNarrow = 0.06;
+        break;
+      case 'listening':
+        tilt = 4.2; gazeX = following ? gazeX : -0.25;
+        mouthOpen = reduced ? 0.38 : 0.25 + 0.25 * Math.sin(this.time * 9);
+        break;
+      case 'focused':
+        gazeX = 0; gazeY = -0.12; tilt = 1.2; eyeNarrow = 0.35;
+        break;
+      case 'happy': {
+        gazeX = 0; gazeY = 0.15; tilt = -2.5; eyeNarrow = 0.28;
+        const bounce = reduced ? 0 : Math.exp(-this.stateTime * 2.9)
+          * Math.sin(this.stateTime * 18);
+        headY = -2.6 * bounce; scaleX = 1 + 0.034 * bounce;
+        scaleY = 1 - 0.034 * bounce;
+        mouthOpen = 0.22;
+        break;
+      }
+      case 'error': {
+        const recoil = reduced ? 0 : Math.exp(-this.stateTime * 5)
+          * Math.sin(this.stateTime * 20);
+        tilt = -6 + recoil * 3;
+        headX = recoil * 2; gazeX = -0.65;
+        eyeNarrow = -0.13;
+        break;
+      }
+      case 'sleep':
+        gazeX = 0; gazeY = 0; tilt = -7.5; eyeNarrow = 0.92;
+        headY = 1;
+        break;
+      default: break;
+    }
+
+    // Attention choreography has precedence over ordinary idle wander and pointer gaze.
+    // During writing Rusty studies the text below, even when the pointer is elsewhere.
+    if (writing && this.state !== 'sleep') {
+      gazeX = this.typing.model ? 0.18 : -0.12;
+      gazeY = 0.94;
+      headY = 1.55;
+      tilt = this.typing.model ? -2.7 : 2.4;
+      eyeNarrow = 0.10;
+    } else if (this.cue && this.state !== 'sleep') {
+      const elapsed = this.time - this.cue.start;
+      if (this.cue.kind === 'notice') {
+        if (elapsed >= 2.25) this.cue = null;
+        else {
+          const intensity = smooth(elapsed / 0.16) * (1 - smooth((elapsed - 1.35) / 0.65));
+          gazeX = this.cue.direction * 0.91 * intensity;
+          gazeY = -0.24 * intensity;
+          headX = this.cue.direction * 0.95 * intensity;
+          tilt = this.cue.direction * 5.5 * intensity;
+        }
+      } else if (this.cue.kind === 'respond') {
+        if (elapsed >= 1.65) this.cue = null;
+        else {
+          const intensity = smooth(elapsed / 0.22) * (1 - smooth((elapsed - 1.05) / 0.50));
+          gazeX = 0;
+          gazeY = -0.08 * intensity;
+          headX = 0;
+          headY = -0.8 * intensity;
+          tilt = -1.6 * intensity;
+          eyeNarrow = 0;
+        }
+      }
+    }
+
+    if (!reduced && this.state === 'idle') {
+      headY += 0.65 * Math.sin(this.time * 1.45);
+      tilt += 0.8 * Math.sin(this.time * 0.74);
+      scaleY += 0.004 * Math.sin(this.time * 1.45);
+    }
+    if (!reduced && this.state === 'sleep') {
+      scaleY += 0.009 * Math.sin(this.time * 1.8);
+    }
+    if (reduced) {
+      headX = 0; headY = 0; tilt = 0; scaleX = 1; scaleY = 1;
+    }
+
+    const targets = {
+      headX: headX * strength, headY: headY * strength, tilt: tilt * strength,
+      scaleX: 1 + (scaleX - 1) * strength,
+      scaleY: 1 + (scaleY - 1) * strength,
+      leftX: gazeX * 3.0 * strength,
+      rightX: gazeX * 3.25 * strength,
+      leftY: gazeY * 2.5 * strength,
+      rightY: gazeY * 2.3 * strength,
+      eyeNarrow, mouthOpen,
+    };
+    for (const [name, spring] of Object.entries(this.values)) {
+      const isEye = ['leftX', 'rightX', 'leftY', 'rightY'].includes(name);
+      const isHead = ['headX', 'headY', 'tilt'].includes(name);
+      spring.frequency = isEye ? this.springFrequency * 1.4
+        : isHead ? this.springFrequency * 0.67
+        : name === 'mouthOpen' ? 5.4 : this.springFrequency;
+      spring.damping = isEye ? 0.91 : 0.79;
+      if (reduced) spring.snap(targets[name]);
+      else spring.step(targets[name], dt);
+    }
+  }
+
+  pose() {
+    const v = this.values;
+    let blink = 0;
+    if (!this.reducedMotion && this.blinkTime >= 0) {
+      const t = this.blinkTime;
+      blink = t < 0.086 ? smooth(t / 0.086) : 1 - smooth((t - 0.086) / 0.119);
+    }
+    // Emotions and blinks are independent. Both eyes keep their own spring.
+    const narrowed = clamp(v.eyeNarrow.value, -0.2, 0.97);
+    const eyeOpen = clamp((1 - narrowed) * (1 - blink * 0.96), 0.045, 1.16);
+    return {
+      state: this.state,
+      headX: v.headX.value, headY: v.headY.value,
+      tilt: v.tilt.value, scaleX: v.scaleX.value, scaleY: v.scaleY.value,
+      leftX: v.leftX.value, leftY: v.leftY.value,
+      rightX: v.rightX.value, rightY: v.rightY.value,
+      eyeOpen, mouthOpen: clamp(v.mouthOpen.value, 0, 1),
+      time: this.time,
+    };
+  }
+}
+
+// Procedural Rusty at a 96x96 logical-pixel resolution: no sprites or images.
+// The head, each eye and the grille are separate animated layers.
+// The browser scales the tiny canvas using nearest-neighbor CSS.
+
+const W = 96;
+const H = 96;
+const C = Object.freeze({
+  outline: '#753800', dark: '#442000', side: '#ca750a', shadow: '#aa5707',
+  yellow: '#f2a015', bright: '#ffc02a', light: '#ffdb61', glint: '#fff1ad',
+  black: '#0d1225', navy: '#17213b', blue: '#25304d', blueLight: '#354462',
+  ivory: '#fff7df', cyan: '#3ae8f7', red: '#e56973',
+});
+
+function rect(ctx, x, y, w, h, color) {
+  ctx.fillStyle = color;
+  ctx.fillRect(Math.round(x), Math.round(y), Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+}
+
+function oval(ctx, cx, cy, rx, ry, color, skew = 0, bounds = [0, 95]) {
+  if (rx <= 0 || ry <= 0) return;
+  ctx.fillStyle = color;
+  for (let y = Math.floor(cy - ry - 1); y <= Math.ceil(cy + ry + 1); y++) {
+    const dy = (y - cy) / ry;
+    if (Math.abs(dy) > 1) continue;
+    const half = rx * Math.sqrt(1 - dy * dy);
+    const rowCx = cx + (y - cy) * skew;
+    const first = Math.max(bounds[0], Math.ceil(rowCx - half));
+    const last = Math.min(bounds[1], Math.floor(rowCx + half));
+    if (first <= last) ctx.fillRect(first, y, last - first + 1, 1);
+  }
+}
+
+function drawBody(ctx) {
+  for (let y = 8; y < 89; y++) {
+    let inset = 0;
+    if (y < 10 || y >= 87) inset = 15;
+    else if (y < 12 || y >= 85) inset = 10;
+    else if (y < 15 || y >= 82) inset = 6;
+    else if (y < 19 || y >= 79) inset = 3;
+    const x0 = 7 + inset;
+    const x1 = 88 - inset;
+    for (let x = x0; x <= x1; x++) {
+      let color = C.yellow;
+      if (y < 14) color = C.bright;
+      if (y < 20 && x < 58) color = C.light;
+      if (x > 78 || y > 78) color = C.side;
+      if (x > 84 || y > 85) color = C.shadow;
+      if (x === x0 || x === x1 || y === 8 || y === 88) color = C.outline;
+      if (x >= x0 + 3 && x <= x1 - 3 && y > 19 && y < 77) {
+        if ((x * 17 + y * 29 + x * y * 3) % 137 < 8) {
+          color = x < 55 ? C.bright : C.side;
+        }
+      }
+      rect(ctx, x, y, 1, 1, color);
+    }
+  }
+  rect(ctx, 20, 11, 53, 1, C.glint);
+  rect(ctx, 12, 22, 1, 46, C.light);
+  rect(ctx, 16, 79, 64, 1, C.shadow);
+  rect(ctx, 80, 18, 1, 53, C.side);
+  rect(ctx, 19, 13, 6, 2, C.glint);
+  rect(ctx, 13, 19, 2, 6, C.glint);
+  rect(ctx, 76, 17, 3, 3, C.cyan);
+  rect(ctx, 81, 17, 3, 3, C.light);
+}
+
+function eye(ctx, cx, cy, dx, dy, open, skew, bounds) {
+  const x = cx + dx;
+  const y = cy + dy;
+  const ry = Math.max(0.75, 22 * open);
+  oval(ctx, x, y, 15.9, ry, C.black, skew, bounds);
+  if (open > 0.09) {
+    oval(ctx, x, y, 14.2, Math.max(0.9, 20 * open), C.navy, skew, bounds);
+    oval(ctx, x - 3, y - 10 * open, 7.5, Math.max(0.6, 5.6 * open), C.blue, skew, bounds);
+    oval(ctx, x - 6, y - 14 * open, 3.1, Math.max(0.5, 2 * open), C.blueLight, skew, bounds);
+  } else {
+    rect(ctx, x - 13, y, 26, 1, C.navy);
+  }
+}
+
+function grille(ctx, open) {
+  const cx = 49;
+  const cy = 72.5;
+  const radiusY = 5.9 + open * 1.6;
+  oval(ctx, cx, cy, 16.5, radiusY + 1, C.outline);
+  oval(ctx, cx, cy, 15, radiusY, C.ivory);
+  oval(ctx, cx, cy, 13.2, Math.max(2.8, radiusY - 1.8), C.black);
+  for (const x of [40, 44, 48, 52, 56]) {
+    const y = Math.round(cy - (2.8 + open));
+    rect(ctx, x, y, 2, 7 + open * 2, C.ivory);
+  }
+}
+
+function particles(ctx, pose) {
+  const flicker = Math.floor(pose.time * 9) % 2;
+  if (pose.state === 'happy') {
+    for (const [x, y] of [[8, 22], [87, 27], [89, 71]]) {
+      rect(ctx, x, y - (flicker ? 1 : 0), 2, 6, C.glint);
+      rect(ctx, x - 2, y + 2 - (flicker ? 1 : 0), 6, 2, C.cyan);
+    }
+  }
+  if (pose.state === 'thinking') {
+    for (let i = 0; i < 3; i++) {
+      const y = 4 - (Math.floor(pose.time * 3) + i) % 3;
+      rect(ctx, 72 + i * 6, y, 3, 3, C.ivory);
+    }
+  }
+  if (pose.state === 'sleep') {
+    rect(ctx, 77, 5 + flicker, 6, 2, C.ivory);
+    rect(ctx, 80, 7 + flicker, 2, 3, C.ivory);
+    rect(ctx, 77, 10 + flicker, 6, 2, C.ivory);
+  }
+  if (pose.state === 'error') {
+    rect(ctx, 76, 17, 3, 3, C.red);
+    rect(ctx, 88, 5, 3, 9, C.red);
+    rect(ctx, 88, 16, 3, 3, C.red);
+  }
+}
+
+function createRustyRenderer(canvas) {
+  if (!(canvas instanceof HTMLCanvasElement)) throw new TypeError('A canvas is required');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d', { alpha: true });
+  ctx.imageSmoothingEnabled = false;
+  // Cache only the *procedurally drawn* shell, never the pre-existing sprite assets.
+  const shell = document.createElement('canvas');
+  shell.width = W;
+  shell.height = H;
+  drawBody(shell.getContext('2d'));
+
+  return function render(pose) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(48 + pose.headX, 48 + pose.headY);
+    ctx.rotate(pose.tilt * Math.PI / 180);
+    ctx.scale(pose.scaleX, pose.scaleY);
+    ctx.translate(-48, -48);
+    ctx.drawImage(shell, 0, 0);
+    // Eye seats are independent springs. Default skew makes them slightly cross-eyed.
+    eye(ctx, 34, 41, pose.leftX, pose.leftY, pose.eyeOpen, -0.085, [16, 48]);
+    eye(ctx, 63, 41, pose.rightX, pose.rightY, pose.eyeOpen, 0.075, [50, 81]);
+    grille(ctx, pose.mouthOpen);
+    particles(ctx, pose);
+    ctx.restore();
+  };
+}
+
+
+    const motion = new RustyMotion();
+    const draw = createRustyRenderer(document.getElementById('rusty'));
+    const stage = document.getElementById('stage');
+    const currentState = document.getElementById('current-state');
+    const currentTilt = document.getElementById('current-tilt');
+    const currentGaze = document.getElementById('current-gaze');
+    const telemetry = document.getElementById('telemetry');
+    const buttons = [...document.querySelectorAll('[data-state]')];
+    const writingBox = document.getElementById('user-writing');
+    const modelTyping = document.getElementById('model-typing');
+    const attention = document.getElementById('attention');
+    function choose(state) {
+      motion.setState(state);
+      buttons.forEach(button => button.setAttribute('aria-pressed', button.dataset.state === state));
+      currentState.textContent = state.toUpperCase();
+    }
+    buttons.forEach(button => button.addEventListener('click', () => choose(button.dataset.state)));
+    stage.addEventListener('pointermove', event => {
+      const r = stage.getBoundingClientRect();
+      motion.setPointer((event.clientX - r.left) / (r.width / 2) - 1,
+        (event.clientY - r.top) / (r.height / 2) - 1);
+    });
+    stage.addEventListener('pointerleave', () => motion.releasePointer());
+    stage.addEventListener('click', () => choose('happy'));
+    document.getElementById('notice-left').addEventListener('click', () => motion.noticeSomething('left'));
+    document.getElementById('notice-right').addEventListener('click', () => motion.noticeSomething('right'));
+    document.getElementById('respond').addEventListener('click', () => {
+      motion.prepareResponse();
+      modelTyping.setAttribute('aria-pressed', 'false');
+    });
+    modelTyping.addEventListener('click', () => {
+      const enabled = !motion.typing.model;
+      motion.setTyping('model', enabled);
+      modelTyping.setAttribute('aria-pressed', String(enabled));
+    });
+    writingBox.addEventListener('focus', () => motion.setTyping('user', true));
+    writingBox.addEventListener('input', () => motion.setTyping('user', true));
+    writingBox.addEventListener('blur', () => motion.setTyping('user', false));
+    document.getElementById('follow').addEventListener('change', event => {
+      motion.followPointer = event.target.checked;
+    });
+    document.getElementById('reduced').addEventListener('change', event => {
+      motion.setReducedMotion(event.target.checked);
+    });
+    document.getElementById('spring').addEventListener('input', event => {
+      motion.springFrequency = Number(event.target.value);
+      document.getElementById('spring-value').textContent = `${motion.springFrequency.toFixed(1)} Hz`;
+    });
+    document.getElementById('strength').addEventListener('input', event => {
+      motion.motionStrength = Number(event.target.value) / 100;
+      document.getElementById('strength-value').textContent = `${event.target.value}%`;
+    });
+    let last = 0;
+    let lastTelemetry = 0;
+    function frame(now) {
+      const dt = last ? Math.min((now - last) / 1000, 0.05) : 1 / 60;
+      last = now;
+      const pose = motion.update(dt);
+      draw(pose);
+      if (now - lastTelemetry > 100) {
+        lastTelemetry = now;
+        currentTilt.textContent = `${pose.tilt.toFixed(1)}°`;
+        currentGaze.textContent = `${pose.leftX.toFixed(1)} / ${pose.rightX.toFixed(1)}`;
+        attention.textContent = motion.typing.user ? 'LEYENDO TU TEXTO'
+          : motion.typing.model ? 'LEYENDO RESPUESTA'
+            : motion.cue?.kind === 'notice' ? 'ALGO LLAMÓ SU ATENCIÓN'
+              : motion.cue?.kind === 'respond' ? 'VUELVE A MIRARTE' : 'LIBRE';
+        telemetry.textContent = `Head Y  ${pose.headY.toFixed(2)} px\n`
+          + `Eye open  ${(pose.eyeOpen * 100).toFixed(0)}%\n`
+          + `Mouth  ${(pose.mouthOpen * 100).toFixed(0)}%\n`
+          + `Motor  local, original, sin sprites`;
+      }
+      requestAnimationFrame(frame);
+    }
+    draw(motion.pose());
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
