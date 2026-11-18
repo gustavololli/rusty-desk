@@ -68,32 +68,100 @@ pub fn console_frame(horizontal: f32, vertical: f32) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(horizontal, vertical))
 }
 
-/// Decorative 16-bit oxidized bezel shared by the main window, island and notch.
-/// The strokes stay inside `rect`, so the actual viewport size is unchanged.
-pub fn paint_oxidized_bezel(painter: &egui::Painter, rect: Rect) {
+#[derive(Debug, Clone, Copy)]
+pub enum BezelSize {
+    Window,
+    Island,
+    Notch,
+}
+
+/// Layered pixel-metal bezel, drawn inside the viewport with no image assets.
+/// Large windows have steel rails and riveted copper corners; the island keeps
+/// lighter rails, and the notch uses a tiny version without screws.
+pub fn paint_oxidized_bezel(painter: &egui::Painter, rect: Rect, size: BezelSize) {
     if rect.width() < 12.0 || rect.height() < 12.0 {
         return;
     }
+    let (rail, corner) = match size {
+        BezelSize::Window => (9.0, 18.0),
+        BezelSize::Island => (6.0, 11.0),
+        BezelSize::Notch => (3.0, 5.0),
+    };
+    let steel = Color32::from_rgb(39, 53, 65);
+    let steel_light = Color32::from_rgb(87, 105, 114);
+    let steel_shadow = Color32::from_rgb(17, 26, 34);
+
+    // Inset rails: shadow, highlight, weathered steel, deep recess and brass lip.
     for (inset, color) in [
         (0.5, OXIDE_DARK),
-        (1.5, OXIDE_COPPER),
-        (2.5, GOLD_DARK),
+        (1.5, steel_shadow),
+        (2.5, steel_light),
+        (3.5, steel),
+        (rail - 2.0, steel_shadow),
+        (rail - 1.0, GOLD_DARK),
     ] {
-        painter.rect_stroke(rect.shrink(inset), 0.0, Stroke::new(1.0, color));
+        if inset >= 0.0 && inset < rail && rect.width() > inset * 2.0 {
+            painter.rect_stroke(rect.shrink(inset), 0.0, Stroke::new(1.0, color));
+        }
+    }
+    if matches!(size, BezelSize::Window | BezelSize::Island) {
+        // Metal rail fill between inner and outer strokes, with directional lighting.
+        for i in 4..(rail as i32 - 2) {
+            let color = if i % 3 == 0 { steel_light } else { steel };
+            painter.rect_stroke(rect.shrink(i as f32 + 0.5), 0.0, Stroke::new(1.0, color));
+        }
     }
 
-    // A handful of uneven corner pixels; avoid repeated patterns along edges.
-    for (x, y, color) in [
-        (rect.left() + 4.0, rect.top() + 1.0, GOLD_LIGHT),
-        (rect.right() - 6.0, rect.top() + 1.0, OXIDE_DARK),
-        (rect.left() + 1.0, rect.bottom() - 6.0, OXIDE_COPPER),
-        (rect.right() - 4.0, rect.bottom() - 4.0, GOLD_DARK),
-    ] {
-        painter.rect_filled(
-            Rect::from_min_size(Pos2::new(x, y), Vec2::splat(2.0)),
-            0.0,
-            color,
-        );
+    // Pixel-stepped copper plates on each corner, like a worn 16-bit console.
+    for (right, bottom) in [(false, false), (true, false), (false, true), (true, true)] {
+        let x = if right { rect.right() - corner } else { rect.left() };
+        let y = if bottom { rect.bottom() - corner } else { rect.top() };
+        for step in 0..3 {
+            let unit = 2.0;
+            let offset = step as f32 * unit;
+            let color = match step {
+                0 => OXIDE_DARK,
+                1 => OXIDE_COPPER,
+                _ => GOLD_DARK,
+            };
+            let px = if right { x + offset } else { x };
+            let py = if bottom { y + offset } else { y };
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(px, py), Vec2::new(corner - offset, unit)),
+                0.0,
+                color,
+            );
+            let vx = if right { x + corner - unit } else { x + offset };
+            let vy = if bottom { y + offset } else { y };
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(vx, vy), Vec2::new(unit, corner - offset)),
+                0.0,
+                color,
+            );
+        }
+        if !matches!(size, BezelSize::Notch) {
+            let center = Pos2::new(x + corner / 2.0, y + corner / 2.0);
+            painter.rect_filled(Rect::from_center_size(center, Vec2::splat(6.0)), 0.0, steel_shadow);
+            painter.rect_filled(Rect::from_center_size(center, Vec2::splat(4.0)), 0.0, GOLD_DARK);
+            painter.line_segment(
+                [center + Vec2::new(-1.0, 1.0), center + Vec2::new(1.0, -1.0)],
+                Stroke::new(1.0, steel_shadow),
+            );
+        }
+    }
+
+    // Deterministic oxide specks, constrained to the rail so the UI stays crisp.
+    if matches!(size, BezelSize::Window) {
+        for n in 0..18 {
+            let t = (n as f32 + 0.6) / 19.0;
+            let x = rect.left() + rect.width() * t;
+            let y = if n % 2 == 0 { rect.top() + 4.0 } else { rect.bottom() - 6.0 };
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(x, y), Vec2::splat(if n % 3 == 0 { 3.0 } else { 2.0 })),
+                0.0,
+                if n % 4 == 0 { OXIDE_COPPER } else { OXIDE_DARK },
+            );
+        }
     }
 }
 
