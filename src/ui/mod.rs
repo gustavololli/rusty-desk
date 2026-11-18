@@ -176,6 +176,10 @@ pub struct RustyDeskApp {
     music_status: Option<String>,
     music_show_add: bool,
     island_music_open: bool,
+    #[cfg(windows)]
+    last_window_focused: Option<bool>,
+    #[cfg(windows)]
+    last_window_minimized: Option<bool>,
     island_sm: IslandStateMachine,
     island_dragging: bool,
     current_monitor: MonitorRect,
@@ -330,6 +334,10 @@ impl RustyDeskApp {
             music_status: None,
             music_show_add: false,
             island_music_open: false,
+            #[cfg(windows)]
+            last_window_focused: None,
+            #[cfg(windows)]
+            last_window_minimized: None,
             island_sm: IslandStateMachine::default(),
             island_dragging: false,
             current_monitor,
@@ -1385,7 +1393,7 @@ impl RustyDeskApp {
 
     fn island_expanded_size(&self, music_active: bool) -> [f32; 2] {
         if music_active {
-            [440.0, if self.island_music_open { 190.0 } else { 110.0 }]
+            [440.0, if self.island_music_open { 170.0 } else { 100.0 }]
         } else {
             [440.0, 76.0]
         }
@@ -1554,6 +1562,32 @@ impl eframe::App for RustyDeskApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        {
+            let (focused, minimized, pointer_inside) = ctx.input(|i| (
+                i.viewport().focused.unwrap_or(false),
+                i.viewport().minimized.unwrap_or(false),
+                i.pointer.hover_pos().is_some(),
+            ));
+            let restored = self.last_window_minimized == Some(true) && !minimized;
+            let activated = self.last_window_focused == Some(false) && focused;
+            self.last_window_focused = Some(focused);
+            self.last_window_minimized = Some(minimized);
+            // A taskbar/Alt+Tab activation comes from outside the tiny window.
+            // Normal clicks on Rusty's sprite must not force a mode change.
+            if !minimized && !pointer_inside && (restored || activated) {
+                match self.window_mode {
+                    WindowMode::Pet => self.set_window_mode(ctx, WindowMode::Island),
+                    WindowMode::Island if self.island_sm.visibility == IslandVisibility::Hidden => {
+                        self.island_sm.reset_visible();
+                        self.island_sm.invalidate_geometry();
+                    }
+                    WindowMode::Expanded | WindowMode::Island => {
+                        // Windows already raises the activated normal window.
+                    }
+                }
+            }
+        }
         self.process_bg_events(ctx);
         if self.config.dreaming.enabled && !self.is_thinking && !self.dreaming_busy
             && self.last_dreaming_attempt.elapsed() >= std::time::Duration::from_secs(120) {
@@ -2306,18 +2340,27 @@ impl RustyDeskApp {
 
             if music_active {
                 ui.add_space(4.0);
-                if pixel_button(
-                    ui,
+                let (bar, response) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), 18.0), egui::Sense::click(),
+                );
+                let bar_color = if response.hovered() || self.island_music_open {
+                    BUTTON_HOVER
+                } else {
+                    BUTTON
+                };
+                ui.painter().rect_filled(bar, 0.0, bar_color);
+                ui.painter().rect_stroke(bar, 0.0, Stroke::new(1.0, retro::BORDER));
+                paint_pixel_icon(
+                    ui.painter(),
+                    egui::Rect::from_center_size(bar.center(), Vec2::splat(14.0)),
                     PixelIcon::MusicNote,
-                    if self.island_music_open { "Ocultar música" } else { "Mostrar música" },
-                    BUTTON,
-                    IVORY,
-                    if self.island_music_open {
-                        "Plegar controles del reproductor"
-                    } else {
-                        "Desplegar canción y controles de música"
-                    },
-                ).clicked() {
+                    accent,
+                );
+                if response.on_hover_text(if self.island_music_open {
+                    "Ocultar reproductor"
+                } else {
+                    "Mostrar reproductor"
+                }).clicked() {
                     self.island_music_open = !self.island_music_open;
                     self.island_sm.invalidate_geometry();
                 }
