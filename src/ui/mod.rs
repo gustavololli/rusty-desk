@@ -1741,10 +1741,14 @@ impl eframe::App for RustyDeskApp {
             egui::CentralPanel::default()
                 .frame(outer_frame)
                 .show(ctx, |ui| {
+                    // The frame's layout can grow when a child asks for more
+                    // width. The bezel must follow the viewport, not that
+                    // potentially oversized content rectangle.
+                    let viewport = ui.max_rect().intersect(ui.clip_rect());
                     let island_frame = console_frame(12.0, 8.0);
 
-                    let framed = island_frame.show(ui, |ui| {
-                        ui.set_min_size(ui.available_size());
+                    island_frame.show(ui, |ui| {
+                        ui.set_min_height(ui.available_height().max(0.0));
                         let controls_enabled = out.visibility != IslandVisibility::Hiding;
                         ui.add_enabled_ui(controls_enabled, |ui| {
                             self.render_compact_island(ui, ctx, pointer_pos, accent, &pet_frame);
@@ -1752,7 +1756,7 @@ impl eframe::App for RustyDeskApp {
                     });
                     retro::paint_oxidized_bezel(
                         ui.painter(),
-                        framed.response.rect,
+                        viewport,
                         retro::BezelSize::Island,
                     );
                 });
@@ -1767,10 +1771,11 @@ impl eframe::App for RustyDeskApp {
         egui::CentralPanel::default()
             .frame(outer_frame)
             .show(ctx, |ui| {
+                let viewport = ui.max_rect().intersect(ui.clip_rect());
                 let island_frame = console_frame(14.0, 10.0);
 
-                let framed = island_frame.show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
+                island_frame.show(ui, |ui| {
+                    ui.set_min_height(ui.available_height().max(0.0));
 
                     if self.window_mode == WindowMode::Island {
                         self.render_compact_island(ui, ctx, pointer_pos, accent, &pet_frame);
@@ -2028,7 +2033,7 @@ impl eframe::App for RustyDeskApp {
                 });
                 retro::paint_oxidized_bezel(
                     ui.painter(),
-                    framed.response.rect,
+                    viewport,
                     retro::BezelSize::Window,
                 );
             });
