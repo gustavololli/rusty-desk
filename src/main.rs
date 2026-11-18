@@ -18,8 +18,19 @@ use eframe::egui;
 use ui::RustyDeskApp;
 
 fn main() -> eframe::Result<()> {
+    // Use Rusty's existing 16-bit idle sprite as the native window/taskbar icon.
+    // Keeping this embedded also works when the executable is moved elsewhere.
+    let rusty_icon = ui::sprites::decode_rgba(include_bytes!(
+        "../assets/rusty-16bit/rusty-idle.png"
+    ))
+    .expect("the bundled Rusty icon must be a valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(egui::IconData {
+                rgba: rusty_icon.pixels,
+                width: rusty_icon.width,
+                height: rusty_icon.height,
+            })
             .with_inner_size([450.0, 650.0])
             .with_min_inner_size([64.0, 64.0])
             .with_decorations(false)
