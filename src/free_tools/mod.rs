@@ -14,7 +14,7 @@ use crate::persistence::Database;
 
 use exchange::FrankfurterProvider;
 use fetch::{fetch_url_safe, format_untrusted_fetch_for_llm};
-use search::{BraveProvider, SearchProvider, SearchQuery, SearchResponse, TavilyProvider};
+use search::{BraveProvider, LangSearchProvider, SearchProvider, SearchQuery, SearchResponse, TavilyProvider};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FreeToolError {
@@ -283,6 +283,9 @@ impl FreeToolsEngine {
             SearchProviderId::Brave => {
                 self.search_cfg_status(provider_id.as_str(), &cfg.brave, true)
             }
+            SearchProviderId::LangSearch => {
+                self.search_cfg_status(provider_id.as_str(), &cfg.langsearch, false)
+            }
             SearchProviderId::Searxng => {
                 if !cfg.searxng.enabled {
                     (ProviderHealthStatus::Disabled, 0, 0)
@@ -353,6 +356,9 @@ impl FreeToolsEngine {
             SearchProviderId::Brave => {
                 Arc::new(BraveProvider::new(self.client.clone(), &cfg.brave.api_key))
             }
+            SearchProviderId::LangSearch => Arc::new(LangSearchProvider::new(
+                self.client.clone(), &cfg.langsearch.api_key,
+            )),
             SearchProviderId::Searxng => Arc::new(search::SearxngProvider {
                 client: self.client.clone(),
                 base_url: cfg.searxng.base_url.clone(),
@@ -363,11 +369,13 @@ impl FreeToolsEngine {
 
     fn provider_order(&self, cfg: &ExternalToolsConfig) -> Vec<SearchProviderId> {
         match cfg.preferred_search_provider {
-            SearchProviderId::Tavily => vec![SearchProviderId::Tavily, SearchProviderId::Brave],
-            SearchProviderId::Brave => vec![SearchProviderId::Brave, SearchProviderId::Tavily],
+            SearchProviderId::Tavily => vec![SearchProviderId::Tavily, SearchProviderId::LangSearch, SearchProviderId::Brave],
+            SearchProviderId::Brave => vec![SearchProviderId::Brave, SearchProviderId::LangSearch, SearchProviderId::Tavily],
+            SearchProviderId::LangSearch => vec![SearchProviderId::LangSearch, SearchProviderId::Tavily, SearchProviderId::Brave],
             SearchProviderId::Searxng => vec![
                 SearchProviderId::Searxng,
                 SearchProviderId::Tavily,
+                SearchProviderId::LangSearch,
                 SearchProviderId::Brave,
             ],
         }
@@ -380,6 +388,7 @@ impl FreeToolsEngine {
         match id {
             SearchProviderId::Tavily => Some(&cfg.tavily),
             SearchProviderId::Brave => Some(&cfg.brave),
+            SearchProviderId::LangSearch => Some(&cfg.langsearch),
             SearchProviderId::Searxng => None,
         }
     }

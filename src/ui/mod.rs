@@ -4592,6 +4592,9 @@ impl RustyDeskApp {
         let (brv_status, brv_used, brv_budget) = self
             .free_tools
             .provider_status(ext, SearchProviderId::Brave);
+        let (lang_status, lang_used, lang_budget) = self
+            .free_tools
+            .provider_status(ext, SearchProviderId::LangSearch);
 
         ui.label(RichText::new("Herramientas externas (Free Tools Engine)").strong());
         ui.add_space(4.0);
@@ -4623,6 +4626,11 @@ impl RustyDeskApp {
                 ui.label("Búsqueda alternativa");
                 ui.label("Brave");
                 ui.label(RichText::new(brv_status.label()).color(status_color(brv_status)));
+                ui.end_row();
+
+                ui.label("Búsqueda gratuita");
+                ui.label("LangSearch");
+                ui.label(RichText::new(lang_status.label()).color(status_color(lang_status)));
                 ui.end_row();
 
                 ui.label("Lectura web");
@@ -4661,6 +4669,9 @@ impl RustyDeskApp {
             .size(11.5)
             .color(accent),
         );
+        ui.label(RichText::new(format!(
+            "LangSearch: {lang_used} / {lang_budget} búsquedas estimadas al mes (cuota real: tokens diarios)"
+        )).size(11.5).color(accent));
 
         ui.add_space(6.0);
         ui.separator();
@@ -4675,6 +4686,11 @@ impl RustyDeskApp {
                 &mut self.config.external_tools.preferred_search_provider,
                 SearchProviderId::Brave,
                 "Brave",
+            );
+            ui.radio_value(
+                &mut self.config.external_tools.preferred_search_provider,
+                SearchProviderId::LangSearch,
+                "LangSearch",
             );
         });
 
@@ -4727,6 +4743,30 @@ impl RustyDeskApp {
             &mut self.config.external_tools.brave.allow_paid_fallback,
             "Permitir usar Brave como respaldo automático (solo si no genera cargos)",
         );
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("LangSearch (plan gratuito)").strong());
+        ui.checkbox(
+            &mut self.config.external_tools.langsearch.enabled,
+            "Habilitar LangSearch",
+        );
+        ui.label("API Key (LangSearch):");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.config.external_tools.langsearch.api_key)
+                .password(true)
+                .desired_width(f32::INFINITY),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Límite local de búsquedas por mes:");
+            ui.add(
+                egui::DragValue::new(&mut self.config.external_tools.langsearch.monthly_budget)
+                    .range(0..=100_000),
+            );
+            if ui.small_button("Probar conexión").clicked() {
+                self.spawn_provider_test(SearchProviderId::LangSearch);
+            }
+        });
+        ui.label("LangSearch tiene una cuota gratuita de tokens diarios; Rusty usa resultados breves.");
 
         if let Some(status) = &self.provider_test_status {
             ui.add_space(4.0);

@@ -197,6 +197,7 @@ pub enum SearchProviderId {
     Tavily,
     Brave,
     Searxng,
+    LangSearch,
 }
 
 impl SearchProviderId {
@@ -205,6 +206,7 @@ impl SearchProviderId {
             Self::Tavily => "tavily",
             Self::Brave => "brave",
             Self::Searxng => "searxng",
+            Self::LangSearch => "langsearch",
         }
     }
 
@@ -213,6 +215,7 @@ impl SearchProviderId {
             Self::Tavily => "Tavily",
             Self::Brave => "Brave",
             Self::Searxng => "SearXNG",
+            Self::LangSearch => "LangSearch",
         }
     }
 }
@@ -261,6 +264,8 @@ pub struct ExternalToolsConfig {
     pub tavily: SearchProviderConfig,
     #[serde(default = "default_brave_config")]
     pub brave: SearchProviderConfig,
+    #[serde(default = "default_langsearch_config")]
+    pub langsearch: SearchProviderConfig,
     #[serde(default)]
     pub searxng: SearxngConfig,
     #[serde(default = "default_true")]
@@ -291,12 +296,24 @@ fn default_brave_config() -> SearchProviderConfig {
     }
 }
 
+fn default_langsearch_config() -> SearchProviderConfig {
+    SearchProviderConfig {
+        enabled: false,
+        api_key: String::new(),
+        // Local monthly request guard; LangSearch itself has a daily token allowance.
+        monthly_budget: 1000,
+        reset_day: Some(1),
+        allow_paid_fallback: false,
+    }
+}
+
 impl Default for ExternalToolsConfig {
     fn default() -> Self {
         Self {
             preferred_search_provider: SearchProviderId::Tavily,
             tavily: SearchProviderConfig::default(),
             brave: default_brave_config(),
+            langsearch: default_langsearch_config(),
             searxng: SearxngConfig::default(),
             web_fetch_enabled: true,
             web_fetch_max_chars: default_fetch_max_chars(),

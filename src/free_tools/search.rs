@@ -201,6 +201,117 @@ impl SearchProvider for TavilyProvider {
     }
 }
 
+/// LangSearch Web Search API. Uses snippets to minimize the free daily token allowance.
+pub struct LangSearchProvider {
+    pub client: Client,
+    pub api_key: String,
+    pub base_url: String,
+    pub timeout: Duration,
+}
+
+impl LangSearchProvider {
+    pub fn new(client: Client, api_key: impl Into<String>) -> Self {
+        Self {
+            client,
+            api_key: api_key.into(),
+            base_url: "https://api.langsearch.com/v1/web-search".to_string(),
+            timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LangSearchApiResponse {
+    data: Option<LangSearchData>,
+}
+
+#[derive(Deserialize)]
+struct LangSearchData {
+    #[serde(rename = "webPages")]
+    web_pages: Option<LangSearchPages>,
+}
+
+#[derive(Deserialize)]
+struct LangSearchPages {
+    #[serde(default)]
+    value: Vec<LangSearchResult>,
+}
+
+#[derive(Deserialize)]
+struct LangSearchResult {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    snippet: String,
+    #[serde(default)]
+    text: String,
+    #[serde(rename = "datePublished")]
+    date_published: Option<String>,
+}
+
+pub fn parse_langsearch_response(
+    body: &str,
+    max_results: usize,
+    elapsed_ms: u64,
+) -> Result<SearchResponse, FreeToolError> {
+    let parsed: LangSearchApiResponse = serde_json::from_str(body).map_err(|_| {
+        FreeToolError::ProviderUnavailable("Respuesta JSON inesperada de LangSearch.".to_string())
+    })?;
+    let pages = parsed.data.and_then(|d| d.web_pages).ok_or_else(|| {
+        FreeToolError::ProviderUnavailable("LangSearch no devolvió la sección webPages.".to_string())
+    })?;
+    let results = pages.value.into_iter()
+        .filter(|r| !r.url.trim().is_empty())
+        .take(max_results)
+        .map(|r| SearchResult {
+            title: if r.name.trim().is_empty() { r.url.trim().to_string() } else { r.name.trim().to_string() },
+            url: r.url.trim().to_string(),
+            snippet: if r.snippet.trim().is_empty() { r.text.trim().to_string() } else { r.snippet.trim().to_string() },
+            source: "LangSearch".to_string(),
+            published_at: r.date_published.filter(|date| !date.trim().is_empty()),
+        })
+        .collect();
+    Ok(SearchResponse {
+        provider: "langsearch".to_string(),
+        results,
+        elapsed_ms,
+        // LangSearch's free quota is token-based, not credits per request.
+        // The local request reservation still counts each successful call as one.
+        confirmed_credits: Some(1),
+    })
+}
+
+#[async_trait]
+impl SearchProvider for LangSearchProvider {
+    fn id(&self) -> &'static str { "langsearch" }
+
+    async fn search(&self, query: SearchQuery) -> Result<SearchResponse, FreeToolError> {
+        if self.api_key.trim().is_empty() {
+            return Err(FreeToolError::NotConfigured("LangSearch no tiene API key configurada.".to_string()));
+        }
+        let start = Instant::now();
+        let response = self.client.post(&self.base_url)
+            .timeout(self.timeout)
+            .bearer_auth(self.api_key.trim())
+            .json(&serde_json::json!({
+                "query": query.query,
+                "count": query.max_results,
+                "freshness": "noLimit",
+            }))
+            .send().await.map_err(map_reqwest_error)?;
+        match response.status().as_u16() {
+            401 | 403 => return Err(FreeToolError::NotConfigured("LangSearch rechazó la API key.".to_string())),
+            429 => return Err(FreeToolError::RateLimited("LangSearch alcanzó su límite de solicitudes o tokens.".to_string())),
+            status if !(200..300).contains(&status) => return Err(FreeToolError::ProviderUnavailable(format!("LangSearch devolvió HTTP {status}."))),
+            _ => {}
+        }
+        let body = response.text().await.map_err(map_reqwest_error)?;
+        parse_langsearch_response(&body, query.max_results, start.elapsed().as_millis() as u64)
+    }
+}
+
 pub struct BraveProvider {
     pub client: Client,
     pub api_key: String,
@@ -454,6 +565,24 @@ pub fn map_reqwest_error(err: reqwest::Error) -> FreeToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_langsearch_results_and_rejects_invalid_payloads() {
+        let payload = r#"{"data":{"webPages":{"value":[
+            {"name":"Official docs","url":"https://example.org/docs","snippet":"Reference","datePublished":"2026-11-01"},
+            {"name":"","url":"https://example.org/2","text":"Fallback content"},
+            {"name":"Invalid","url":"","snippet":"ignored"}
+        ]}}}"#;
+        let result = parse_langsearch_response(payload, 5, 12).unwrap();
+        assert_eq!(result.provider, "langsearch");
+        assert_eq!(result.results.len(), 2);
+        assert_eq!(result.results[0].published_at.as_deref(), Some("2026-11-01"));
+        assert_eq!(result.results[1].title, "https://example.org/2");
+        assert_eq!(result.results[1].snippet, "Fallback content");
+        assert!(parse_langsearch_response(r#"{"data":{"webPages":{"value":[]}}}"#, 5, 0).unwrap().results.is_empty());
+        assert!(parse_langsearch_response("{}", 5, 0).is_err());
+        assert!(parse_langsearch_response("invalid", 5, 0).is_err());
+    }
 
     #[test]
     fn normalizes_tavily_valid_empty_missing_and_unexpected_json() {
