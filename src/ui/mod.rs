@@ -174,6 +174,7 @@ pub struct RustyDeskApp {
     music_tracks: Vec<PersistedTrack>,
     music_current_track_idx: Option<usize>,
     music_status: Option<String>,
+    music_show_add: bool,
     island_sm: IslandStateMachine,
     island_dragging: bool,
     current_monitor: MonitorRect,
@@ -326,6 +327,7 @@ impl RustyDeskApp {
             music_tracks: initial_tracks,
             music_current_track_idx: None,
             music_status: None,
+            music_show_add: false,
             island_sm: IslandStateMachine::default(),
             island_dragging: false,
             current_monitor,
@@ -1964,16 +1966,23 @@ impl eframe::App for RustyDeskApp {
                         ui.add_space(6.0);
                     }
 
+                    if self.active_tab == ActiveTab::Music {
+                        egui::ScrollArea::vertical()
+                            .id_salt("music_section_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.render_music_tab(ui, ctx, accent));
+                    } else {
                     match self.active_tab {
                         ActiveTab::Chat => self.render_chat_tab(ui, ctx, accent),
                         ActiveTab::Tasks => self.render_tasks_tab(ui),
                         ActiveTab::Habits => self.render_habits_tab(ui, accent),
                         ActiveTab::Focus => self.render_focus_tab(ui, accent),
-                        ActiveTab::Music => self.render_music_tab(ui, ctx, accent),
+                        ActiveTab::Music => unreachable!("Music handled by its scroll area"),
                         ActiveTab::Organizer => self.render_organizer_tab(ui, accent),
                         ActiveTab::Markdown => self.render_markdown_tab(ui, ctx, accent),
                         ActiveTab::Compact => self.render_compact_tab(ui, ctx, accent),
                         ActiveTab::Settings => self.render_settings_tab(ui, accent),
+                    }
                     }
                 });
             });
@@ -3757,6 +3766,12 @@ impl RustyDeskApp {
                 }
             }
         }
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.music_show_add, false, "♫ Biblioteca");
+            ui.selectable_value(&mut self.music_show_add, true, "+ Agregar música");
+        });
+        ui.separator();
+        if self.music_show_add {
         ui.label(RichText::new("Agregar playlist (.m3u / .m3u8)").strong());
         // Stack the input above its actions. Fixed-width horizontal controls
         // previously pushed "Elegir .m3u" outside narrow windows.
@@ -3828,11 +3843,14 @@ impl RustyDeskApp {
                 }
             });
         });
+        return;
+        }
 
         ui.add_space(6.0);
         // Minimum playback controls: Play, Stop, Volume
         let is_active = self.music_player.is_active();
         let is_paused = self.music_player.is_paused();
+        if !is_active {
         egui::Frame::none()
             .fill(Color32::from_rgb(20, 27, 45))
             .rounding(0.0)
@@ -3909,6 +3927,7 @@ impl RustyDeskApp {
                 ui.add_space(4.0);
                 ui.label(RichText::new(now_playing).size(11.5).color(accent));
             });
+        }
 
         ui.add_space(6.0);
         ui.separator();
@@ -3925,10 +3944,7 @@ impl RustyDeskApp {
                     .color(Color32::GRAY),
             );
         } else {
-            egui::ScrollArea::vertical()
-                .id_salt("music_playlists_scroll")
-                .max_height(110.0)
-                .show(ui, |ui| {
+            ui.vertical(|ui| {
                     for pl in &self.data.playlists {
                         let is_selected = self
                             .music_selected_playlist_id
@@ -3985,9 +4001,7 @@ impl RustyDeskApp {
 
         let mut clicked_track: Option<usize> = None;
         let mut track_to_delete: Option<(usize, String, String)> = None;
-        egui::ScrollArea::vertical()
-            .id_salt("music_tracks_scroll")
-            .show(ui, |ui| {
+        ui.vertical(|ui| {
                 if self.music_tracks.is_empty() {
                     ui.label(
                         RichText::new("Seleccioná una playlist para ver sus pistas.")
