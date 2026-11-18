@@ -75,6 +75,20 @@ pub enum BezelSize {
     Notch,
 }
 
+fn corner_arms(rect: Rect, corner: f32, right: bool, bottom: bool, step: u32) -> (Rect, Rect) {
+    let unit = 2.0;
+    let offset = step as f32 * unit;
+    let length = corner - offset;
+    let px = if right { rect.right() - offset - length } else { rect.left() + offset };
+    let py = if bottom { rect.bottom() - offset - unit } else { rect.top() + offset };
+    let vx = if right { rect.right() - offset - unit } else { rect.left() + offset };
+    let vy = if bottom { rect.bottom() - offset - length } else { rect.top() + offset };
+    (
+        Rect::from_min_size(Pos2::new(px, py), Vec2::new(length, unit)),
+        Rect::from_min_size(Pos2::new(vx, vy), Vec2::new(unit, length)),
+    )
+}
+
 /// Layered pixel-metal bezel, drawn inside the viewport with no image assets.
 /// Large windows have steel rails and riveted copper corners; the island keeps
 /// lighter rails, and the notch uses a tiny version without screws.
@@ -112,35 +126,25 @@ pub fn paint_oxidized_bezel(painter: &egui::Painter, rect: Rect, size: BezelSize
         }
     }
 
-    // Pixel-stepped copper plates on each corner, like a worn 16-bit console.
+    // Mirror the SAME top-left L-shaped plate into all four corners. The old
+    // bottom/right offsets weren't mirrored, leaving disconnected pixels.
     for (right, bottom) in [(false, false), (true, false), (false, true), (true, true)] {
-        let x = if right { rect.right() - corner } else { rect.left() };
-        let y = if bottom { rect.bottom() - corner } else { rect.top() };
         for step in 0..3 {
-            let unit = 2.0;
-            let offset = step as f32 * unit;
             let color = match step {
                 0 => OXIDE_DARK,
                 1 => OXIDE_COPPER,
                 _ => GOLD_DARK,
             };
-            let px = if right { x + offset } else { x };
-            let py = if bottom { y + offset } else { y };
-            painter.rect_filled(
-                Rect::from_min_size(Pos2::new(px, py), Vec2::new(corner - offset, unit)),
-                0.0,
-                color,
-            );
-            let vx = if right { x + corner - unit } else { x + offset };
-            let vy = if bottom { y + offset } else { y };
-            painter.rect_filled(
-                Rect::from_min_size(Pos2::new(vx, vy), Vec2::new(unit, corner - offset)),
-                0.0,
-                color,
-            );
+            let (horizontal, vertical) = corner_arms(rect, corner, right, bottom, step);
+            painter.rect_filled(horizontal, 0.0, color);
+            painter.rect_filled(vertical, 0.0, color);
         }
         if !matches!(size, BezelSize::Notch) {
-            let center = Pos2::new(x + corner / 2.0, y + corner / 2.0);
+            let axis = (rail / 2.0).floor() + 1.0;
+            let center = Pos2::new(
+                if right { rect.right() - axis } else { rect.left() + axis },
+                if bottom { rect.bottom() - axis } else { rect.top() + axis },
+            );
             painter.rect_filled(Rect::from_center_size(center, Vec2::splat(6.0)), 0.0, steel_shadow);
             painter.rect_filled(Rect::from_center_size(center, Vec2::splat(4.0)), 0.0, GOLD_DARK);
             painter.line_segment(
@@ -315,5 +319,42 @@ mod tests {
         assert_eq!(brighter, Color32::from_rgb(255, 30, 20));
         let darker = shade(Color32::from_rgb(5, 0, 8), -20);
         assert_eq!(darker, Color32::from_rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn oxidized_corner_arms_remain_inside_all_viewport_sizes() {
+        for (width, height, corner) in [
+            (580.0, 820.0, 18.0),
+            (440.0, 100.0, 11.0),
+            (88.0, 24.0, 5.0),
+        ] {
+            let viewport = Rect::from_min_size(Pos2::new(11.0, 7.0), Vec2::new(width, height));
+            for (right, bottom) in [(false, false), (true, false), (false, true), (true, true)] {
+                for step in 0..3 {
+                    let (h, v) = corner_arms(viewport, corner, right, bottom, step);
+                    for arm in [h, v] {
+                        assert!(viewport.contains(arm.min));
+                        assert!(arm.max.x <= viewport.max.x);
+                        assert!(arm.max.y <= viewport.max.y);
+                        assert!(arm.width() > 0.0 && arm.height() > 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oxidized_corners_mirror_identically() {
+        let r = Rect::from_min_size(Pos2::ZERO, Vec2::new(440.0, 100.0));
+        for step in 0..3 {
+            let (tl_h, tl_v) = corner_arms(r, 11.0, false, false, step);
+            let (tr_h, tr_v) = corner_arms(r, 11.0, true, false, step);
+            let (bl_h, bl_v) = corner_arms(r, 11.0, false, true, step);
+            assert_eq!(tl_h.size(), tr_h.size());
+            assert_eq!(tl_v.size(), tr_v.size());
+            assert_eq!(tl_h.size(), bl_h.size());
+            assert!((tl_h.min.x - (r.max.x - tr_h.max.x)).abs() < 0.01);
+            assert!((tl_v.min.y - (r.max.y - bl_v.max.y)).abs() < 0.01);
+        }
     }
 }
