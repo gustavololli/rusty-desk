@@ -38,6 +38,7 @@ Los marcos se dibujan con una **textura 9-slice**: las esquinas pixeladas no se 
 - **📝 Organizar tareas y hábitos.** Creá, completá y seguí tus pendientes; registrá hábitos cotidianos.
 - **⏳ Entrar en foco.** Temporizador Pomodoro, pausas y tareas vinculadas a las sesiones de concentración.
 - **🎵 Escuchar música.** Reproducción de URLs de audio y listas `.m3u` / `.m3u8`, con controles también en la isla. La disponibilidad de formatos y controles depende del sistema.
+- **🔊 Escuchar efectos de 16 bits.** Once señales sonoras originales para tareas, mensajes, enfoque y errores: estéreo a 44,1 kHz, notas superpuestas y ecos discretos. Podés desactivarlas o reemplazarlas con tus propios archivos WAV.
 - **🗂️ Ordenar archivos.** Herramientas de organización del escritorio y conversión a Markdown.
 - **🔎 Consultar información.** Integraciones opcionales para búsqueda web, lectura de páginas, clima y tipos de cambio.
 - **🧠 Dreaming (experimental).** Un modelo configurable, independiente del asistente principal, puede analizar historial de conversaciones y generar recuerdos almacenados localmente en SQLite. Está desactivado de forma predeterminada y requiere configuración explícita.
@@ -117,6 +118,10 @@ assets/
 ```
 
 Rusty está construido sobre **Rust + egui/eframe**, con **SQLite** para persistencia. La interfaz y las animaciones son locales: no necesitan una conexión a IA para moverse.
+
+### 🔊 Identidad sonora
+
+Los efectos de Rusty tienen un estilo inspirado en las consolas de 16 bits. Se sintetizan localmente y se guardan en caché como archivos **WAV estéreo PCM de 16 bits / 44.100 Hz**; no requieren servicios externos ni generación por IA. Los archivos personalizados con el mismo nombre que los efectos internos tienen prioridad y se buscan en la carpeta `sounds` del directorio de configuración de la aplicación.
 
 ## 🧪 Contribuir
 
