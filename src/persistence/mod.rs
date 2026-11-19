@@ -262,7 +262,7 @@ impl Database {
                 (score > 0).then_some((score, content))
             })
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|item| std::cmp::Reverse(item.0));
         Ok(scored
             .into_iter()
             .take(limit)
