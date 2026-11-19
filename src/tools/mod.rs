@@ -472,7 +472,7 @@ fn validate_args(spec: &ToolSpec, args: &Value) -> Result<(), String> {
         }
         "start_pomodoro" => {
             if let Some(m) = args.get("minutes").and_then(|v| v.as_i64()) {
-                if m < 1 || m > 180 {
+                if !(1..=180).contains(&m) {
                     return Err(
                         "Argumento inválido: 'minutes' debe estar entre 1 y 180.".to_string()
                     );
@@ -489,10 +489,8 @@ fn validate_args(spec: &ToolSpec, args: &Value) -> Result<(), String> {
             crate::music::normalize_audio_url(raw)
                 .map_err(|e| format!("Argumento inválido: {e}"))?;
         }
-        "get_weather" => {
-            if args["city"].as_str().unwrap_or("").trim().is_empty() {
-                return Err("Argumento inválido: 'city' no puede estar vacío.".to_string());
-            }
+        "get_weather" if args["city"].as_str().unwrap_or("").trim().is_empty() => {
+            return Err("Argumento inválido: 'city' no puede estar vacío.".to_string());
         }
         _ => {}
     }
