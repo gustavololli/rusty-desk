@@ -518,17 +518,15 @@ impl AppData {
                     }
                     data
                 }
-                Err(e) => {
-                    let mut fallback = Self::default();
-                    fallback.startup_error = Some(format!("Error cargando SQLite: {e}"));
-                    fallback
-                }
+                Err(e) => Self {
+                    startup_error: Some(format!("Error cargando SQLite: {e}")),
+                    ..Self::default()
+                },
             },
-            Err(e) => {
-                let mut fallback = Self::default();
-                fallback.startup_error = Some(format!("Error abriendo/migrando SQLite: {e}"));
-                fallback
-            }
+            Err(e) => Self {
+                startup_error: Some(format!("Error abriendo/migrando SQLite: {e}")),
+                ..Self::default()
+            },
         }
     }
 
