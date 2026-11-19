@@ -18,7 +18,8 @@ impl CompactionMode {
             "none" | "normal" | "ninguna" => Self::None,
             "line" | "linea" | "lines" => Self::LineByLine,
             "extreme" | "extrema" | "max" => Self::Extreme,
-            "moderate" | "moderada" | _ => Self::Moderate,
+            // "moderate", "moderada", empty, and unknown values share this default.
+            _ => Self::Moderate,
         }
     }
 
@@ -50,7 +51,7 @@ pub fn compact_for_llm(input: &str, mode: CompactionMode) -> String {
 
             for raw_line in normalized.lines() {
                 let collapsed: String = raw_line
-                    .split(|c| c == ' ' || c == '\t')
+                    .split([' ', '\t'])
                     .filter(|part| !part.is_empty())
                     .collect::<Vec<_>>()
                     .join(" ");
