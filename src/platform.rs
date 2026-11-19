@@ -4,13 +4,21 @@ use std::sync::{Arc, Mutex};
 /// Compile-time host detection; native backends are selected by the target OS.
 pub fn host_os_label() -> &'static str {
     #[cfg(target_os = "windows")]
-    { return "Windows"; }
+    {
+        return "Windows";
+    }
     #[cfg(target_os = "linux")]
-    { return "Linux"; }
+    {
+        return "Linux";
+    }
     #[cfg(target_os = "macos")]
-    { return "macOS"; }
+    {
+        return "macOS";
+    }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-    { "Otro sistema" }
+    {
+        "Otro sistema"
+    }
 }
 
 /// Display server session kind.
@@ -70,18 +78,20 @@ pub fn detect_session_kind() -> SessionKind {
 /// Queries the X11 root screen dimensions in physical pixels.
 pub fn query_x11_virtual_bounds() -> Option<(f32, f32, f32, f32)> {
     #[cfg(not(target_os = "linux"))]
-    { return None; }
+    {
+        return None;
+    }
     #[cfg(target_os = "linux")]
     {
-    use x11rb::connection::Connection;
-    let (conn, screen_num) = x11rb::connect(None).ok()?;
-    let screen = conn.setup().roots.get(screen_num)?;
-    Some((
-        0.0,
-        0.0,
-        f32::from(screen.width_in_pixels),
-        f32::from(screen.height_in_pixels),
-    ))
+        use x11rb::connection::Connection;
+        let (conn, screen_num) = x11rb::connect(None).ok()?;
+        let screen = conn.setup().roots.get(screen_num)?;
+        Some((
+            0.0,
+            0.0,
+            f32::from(screen.width_in_pixels),
+            f32::from(screen.height_in_pixels),
+        ))
     }
 }
 
@@ -222,61 +232,64 @@ pub fn spawn_global_cursor_tracker() -> Arc<Mutex<Option<(i16, i16)>>> {
 /// asynchronously so KWin keeps Rusty-Desk above other windows when requested.
 pub fn apply_platform_always_on_top(enabled: bool) {
     #[cfg(not(target_os = "linux"))]
-    { let _ = enabled; return; }
-    #[cfg(target_os = "linux")]
     {
-    let is_wayland = std::env::var("XDG_SESSION_TYPE")
-        .map(|v| v.eq_ignore_ascii_case("wayland"))
-        .unwrap_or(false)
-        || std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let is_kde = std::env::var("XDG_CURRENT_DESKTOP")
-        .map(|v| v.to_ascii_uppercase().contains("KDE"))
-        .unwrap_or(false);
-
-    if !is_wayland || !is_kde {
+        let _ = enabled;
         return;
     }
+    #[cfg(target_os = "linux")]
+    {
+        let is_wayland = std::env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false)
+            || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let is_kde = std::env::var("XDG_CURRENT_DESKTOP")
+            .map(|v| v.to_ascii_uppercase().contains("KDE"))
+            .unwrap_or(false);
 
-    std::thread::spawn(move || {
-        use std::process::Command;
-
-        const RULE_ID: &str = "rusty-desk-always-on-top";
-        let rules_path = directories::BaseDirs::new()
-            .map(|b| b.config_dir().join("kwinrulesrc"))
-            .unwrap_or_else(|| std::path::PathBuf::from("kwinrulesrc"));
-
-        let existing_rules = std::fs::read_to_string(&rules_path)
-            .ok()
-            .and_then(|raw| {
-                raw.lines()
-                    .find_map(|line| line.strip_prefix("rules=").map(str::to_string))
-            })
-            .unwrap_or_default();
-        let merged_rules = merge_kwin_rules_list(&existing_rules, RULE_ID);
-        let above_val = if enabled { "true" } else { "false" };
-
-        let writes = [
-            ("General", "rules", merged_rules.as_str()),
-            (RULE_ID, "Description", "Rusty-Desk Always On Top"),
-            (RULE_ID, "title", "Rusty-Desk"),
-            (RULE_ID, "titlematch", "1"),
-            (RULE_ID, "above", above_val),
-            (RULE_ID, "aboverule", "2"),
-        ];
-
-        for (group, key, val) in writes {
-            let status = Command::new("kwriteconfig6")
-                .args(["--file", "kwinrulesrc", "--group", group, "--key", key, val])
-                .status();
-            if status.is_err() {
-                return;
-            }
+        if !is_wayland || !is_kde {
+            return;
         }
 
-        let _ = Command::new("qdbus6")
-            .args(["org.kde.KWin", "/KWin", "reconfigure"])
-            .status();
-    });
+        std::thread::spawn(move || {
+            use std::process::Command;
+
+            const RULE_ID: &str = "rusty-desk-always-on-top";
+            let rules_path = directories::BaseDirs::new()
+                .map(|b| b.config_dir().join("kwinrulesrc"))
+                .unwrap_or_else(|| std::path::PathBuf::from("kwinrulesrc"));
+
+            let existing_rules = std::fs::read_to_string(&rules_path)
+                .ok()
+                .and_then(|raw| {
+                    raw.lines()
+                        .find_map(|line| line.strip_prefix("rules=").map(str::to_string))
+                })
+                .unwrap_or_default();
+            let merged_rules = merge_kwin_rules_list(&existing_rules, RULE_ID);
+            let above_val = if enabled { "true" } else { "false" };
+
+            let writes = [
+                ("General", "rules", merged_rules.as_str()),
+                (RULE_ID, "Description", "Rusty-Desk Always On Top"),
+                (RULE_ID, "title", "Rusty-Desk"),
+                (RULE_ID, "titlematch", "1"),
+                (RULE_ID, "above", above_val),
+                (RULE_ID, "aboverule", "2"),
+            ];
+
+            for (group, key, val) in writes {
+                let status = Command::new("kwriteconfig6")
+                    .args(["--file", "kwinrulesrc", "--group", group, "--key", key, val])
+                    .status();
+                if status.is_err() {
+                    return;
+                }
+            }
+
+            let _ = Command::new("qdbus6")
+                .args(["org.kde.KWin", "/KWin", "reconfigure"])
+                .status();
+        });
     }
 }
 

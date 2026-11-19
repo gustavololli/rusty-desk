@@ -141,41 +141,41 @@ pub fn pick_m3u_file_dialog() -> Result<Option<PathBuf>, String> {
     }
     #[cfg(not(windows))]
     {
-    if let Ok(out) = Command::new("kdialog")
-        .args([
-            "--getopenfilename",
-            ".",
-            "*.m3u *.m3u8|Playlists M3U (*.m3u, *.m3u8)",
-        ])
-        .output()
-    {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return Ok((!p.is_empty()).then(|| PathBuf::from(p)));
+        if let Ok(out) = Command::new("kdialog")
+            .args([
+                "--getopenfilename",
+                ".",
+                "*.m3u *.m3u8|Playlists M3U (*.m3u, *.m3u8)",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                return Ok((!p.is_empty()).then(|| PathBuf::from(p)));
+            }
+            if out.status.code() == Some(1) {
+                return Ok(None);
+            }
         }
-        if out.status.code() == Some(1) {
-            return Ok(None);
-        }
-    }
 
-    if let Ok(out) = Command::new("zenity")
-        .args([
-            "--file-selection",
-            "--title=Seleccionar playlist .m3u",
-            "--file-filter=Playlists M3U (*.m3u *.m3u8) | *.m3u *.m3u8",
-        ])
-        .output()
-    {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return Ok((!p.is_empty()).then(|| PathBuf::from(p)));
+        if let Ok(out) = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--title=Seleccionar playlist .m3u",
+                "--file-filter=Playlists M3U (*.m3u *.m3u8) | *.m3u *.m3u8",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                return Ok((!p.is_empty()).then(|| PathBuf::from(p)));
+            }
+            if out.status.code() == Some(1) {
+                return Ok(None);
+            }
         }
-        if out.status.code() == Some(1) {
-            return Ok(None);
-        }
-    }
 
-    Err("No se encontró kdialog ni zenity para abrir el selector de archivos.".to_string())
+        Err("No se encontró kdialog ni zenity para abrir el selector de archivos.".to_string())
     }
 }
 
@@ -255,11 +255,16 @@ impl VolumeBackend for WindowsVolumeBackend {
             }
             struct UninitCom;
             impl Drop for UninitCom {
-                fn drop(&mut self) { unsafe { CoUninitialize(); } }
+                fn drop(&mut self) {
+                    unsafe {
+                        CoUninitialize();
+                    }
+                }
             }
             let _com = UninitCom;
             let apply = || -> windows::core::Result<bool> {
-                let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+                let enumerator: IMMDeviceEnumerator =
+                    CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
                 let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
                 let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
                 let sessions = manager.GetSessionEnumerator()?;
@@ -267,9 +272,12 @@ impl VolumeBackend for WindowsVolumeBackend {
                 for i in 0..sessions.GetCount()? {
                     let session = sessions.GetSession(i)?;
                     let info: IAudioSessionControl2 = session.cast()?;
-                    if info.GetProcessId()? != pid { continue; }
+                    if info.GetProcessId()? != pid {
+                        continue;
+                    }
                     let control: ISimpleAudioVolume = session.cast()?;
-                    control.SetMasterVolume(volume_pct.min(100) as f32 / 100.0, std::ptr::null())?;
+                    control
+                        .SetMasterVolume(volume_pct.min(100) as f32 / 100.0, std::ptr::null())?;
                     control.SetMute(muted, std::ptr::null())?;
                     matched = true;
                 }
@@ -362,7 +370,9 @@ pub struct MusicPlayer {
 impl Default for MusicPlayer {
     fn default() -> Self {
         #[cfg(windows)]
-        { return Self::with_backend(Arc::new(WindowsVolumeBackend)); }
+        {
+            return Self::with_backend(Arc::new(WindowsVolumeBackend));
+        }
         #[cfg(not(windows))]
         Self::with_backend(Arc::new(PactlVolumeBackend))
     }
@@ -547,9 +557,16 @@ impl MusicPlayer {
         }
 
         #[cfg(windows)]
-        { Err("No se encontró ffplay. Instalá FFmpeg y agregá ffplay.exe al PATH para reproducir música en Windows.".to_string()) }
+        {
+            Err("No se encontró ffplay. Instalá FFmpeg y agregá ffplay.exe al PATH para reproducir música en Windows.".to_string())
+        }
         #[cfg(not(windows))]
-        { Err("No se encontró un reproductor compatible (ffplay, gst-play-1.0 o mpg123).".to_string()) }
+        {
+            Err(
+                "No se encontró un reproductor compatible (ffplay, gst-play-1.0 o mpg123)."
+                    .to_string(),
+            )
+        }
     }
 
     pub fn pause(&mut self) {
@@ -564,12 +581,12 @@ impl MusicPlayer {
         }
         #[cfg(not(windows))]
         {
-        if let Some(pid) = self.child.as_ref().map(Child::id) {
-            let _ = Command::new("kill")
-                .args(["-STOP", &pid.to_string()])
-                .status();
-            self.paused = true;
-        }
+            if let Some(pid) = self.child.as_ref().map(Child::id) {
+                let _ = Command::new("kill")
+                    .args(["-STOP", &pid.to_string()])
+                    .status();
+                self.paused = true;
+            }
         }
     }
 
@@ -578,16 +595,18 @@ impl MusicPlayer {
             return;
         }
         #[cfg(windows)]
-        { return; }
+        {
+            return;
+        }
         #[cfg(not(windows))]
         {
-        if let Some(pid) = self.child.as_ref().map(Child::id) {
-            let _ = Command::new("kill")
-                .args(["-CONT", &pid.to_string()])
-                .status();
-            self.paused = false;
-            self.push_worker_target(pid, 4);
-        }
+            if let Some(pid) = self.child.as_ref().map(Child::id) {
+                let _ = Command::new("kill")
+                    .args(["-CONT", &pid.to_string()])
+                    .status();
+                self.paused = false;
+                self.push_worker_target(pid, 4);
+            }
         }
     }
 

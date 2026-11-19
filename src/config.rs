@@ -339,11 +339,19 @@ pub struct DreamingConfig {
     pub allow_remote: bool,
 }
 
-fn default_dreaming_url() -> String { "http://localhost:1234/v1".into() }
+fn default_dreaming_url() -> String {
+    "http://localhost:1234/v1".into()
+}
 
 impl Default for DreamingConfig {
     fn default() -> Self {
-        Self { enabled: false, base_url: default_dreaming_url(), api_key: String::new(), model: String::new(), allow_remote: false }
+        Self {
+            enabled: false,
+            base_url: default_dreaming_url(),
+            api_key: String::new(),
+            model: String::new(),
+            allow_remote: false,
+        }
     }
 }
 

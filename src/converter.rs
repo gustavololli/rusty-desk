@@ -151,7 +151,7 @@ fn extract_pdf_with_pdftotext(path: &Path) -> Result<String, String> {
     }
     #[cfg(not(windows))]
     {
-    let output = Command::new("pdftotext")
+        let output = Command::new("pdftotext")
         .arg("-layout")
         .arg(path)
         .arg("-")
@@ -162,26 +162,26 @@ fn extract_pdf_with_pdftotext(path: &Path) -> Result<String, String> {
             )
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Error al extraer texto del PDF con pdftotext: {stderr}"
-        ));
-    }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "Error al extraer texto del PDF con pdftotext: {stderr}"
+            ));
+        }
 
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        return Err(
-            "El PDF no contiene texto extraíble (posiblemente sea una imagen escaneada)."
-                .to_string(),
-        );
-    }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() {
+            return Err(
+                "El PDF no contiene texto extraíble (posiblemente sea una imagen escaneada)."
+                    .to_string(),
+            );
+        }
 
-    let title = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("Documento PDF");
-    Ok(format!("# {title}\n\n{text}\n"))
+        let title = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Documento PDF");
+        Ok(format!("# {title}\n\n{text}\n"))
     }
 }
 
@@ -223,47 +223,47 @@ pub fn pick_files_dialog() -> Result<Vec<PathBuf>, String> {
 
     #[cfg(not(windows))]
     {
-    if let Ok(output) = Command::new("zenity")
-        .args([
-            "--file-selection",
-            "--multiple",
-            "--separator=\n",
-            "--title=Seleccionar archivo para MarkItDown",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let paths: Vec<PathBuf> = stdout
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(PathBuf::from)
-                .collect();
-            return Ok(paths);
+        if let Ok(output) = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--multiple",
+                "--separator=\n",
+                "--title=Seleccionar archivo para MarkItDown",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let paths: Vec<PathBuf> = stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+                return Ok(paths);
+            }
+            // User cancelled dialog
+            return Ok(Vec::new());
         }
-        // User cancelled dialog
-        return Ok(Vec::new());
-    }
 
-    if let Ok(output) = Command::new("kdialog")
-        .args(["--getopenfilename", ".", "--multiple", "--separate-output"])
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let paths: Vec<PathBuf> = stdout
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(PathBuf::from)
-                .collect();
-            return Ok(paths);
+        if let Ok(output) = Command::new("kdialog")
+            .args(["--getopenfilename", ".", "--multiple", "--separate-output"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let paths: Vec<PathBuf> = stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+                return Ok(paths);
+            }
+            return Ok(Vec::new());
         }
-        return Ok(Vec::new());
-    }
 
-    Err("No se encontró 'zenity' ni 'kdialog' para abrir el selector de archivos. Podés arrastrar y soltar el archivo directamente.".to_string())
+        Err("No se encontró 'zenity' ni 'kdialog' para abrir el selector de archivos. Podés arrastrar y soltar el archivo directamente.".to_string())
     }
 }
 

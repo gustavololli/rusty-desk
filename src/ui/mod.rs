@@ -22,8 +22,8 @@ use crate::music::{self, MusicPlayer};
 use crate::organizer::FileOrganizer;
 use crate::persistence::{ConversationSummary, MessageKind, NewMusicTrack, PersistedTrack};
 use crate::platform::{
-    apply_platform_always_on_top, detect_current_monitor, detect_session_kind,
-    host_os_label, query_x11_virtual_bounds, spawn_global_cursor_tracker, MonitorRect, SessionKind,
+    apply_platform_always_on_top, detect_current_monitor, detect_session_kind, host_os_label,
+    query_x11_virtual_bounds, spawn_global_cursor_tracker, MonitorRect, SessionKind,
 };
 use crate::sfx::{self, SfxEvent};
 use crate::state::{
@@ -1328,8 +1328,11 @@ impl RustyDeskApp {
         let empty = match self.active_tab {
             ActiveTab::Tasks if self.data.tasks.is_empty() => Some(EmptySection::Tasks),
             ActiveTab::Habits if self.data.habits.is_empty() => Some(EmptySection::Habits),
-            ActiveTab::Music if self.data.playlists.is_empty()
-                || (self.music_selected_playlist_id.is_some() && self.music_tracks.is_empty()) => {
+            ActiveTab::Music
+                if self.data.playlists.is_empty()
+                    || (self.music_selected_playlist_id.is_some()
+                        && self.music_tracks.is_empty()) =>
+            {
                 Some(EmptySection::Music)
             }
             ActiveTab::Chat if self.chat_ui.len() <= 1 => Some(EmptySection::Chat),
@@ -1343,7 +1346,9 @@ impl RustyDeskApp {
         let became_empty = empty.is_some() && self.last_section_empty != empty;
         self.last_section_empty = empty;
         if (entering || became_empty) && !self.is_thinking && !self.md_is_converting {
-            if let Some(section) = empty { self.emit_pet_event(PetEvent::SectionEmpty(section)); }
+            if let Some(section) = empty {
+                self.emit_pet_event(PetEvent::SectionEmpty(section));
+            }
         }
     }
 
@@ -1565,11 +1570,13 @@ impl eframe::App for RustyDeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(windows)]
         {
-            let (focused, minimized, pointer_inside) = ctx.input(|i| (
-                i.viewport().focused.unwrap_or(false),
-                i.viewport().minimized.unwrap_or(false),
-                i.pointer.hover_pos().is_some(),
-            ));
+            let (focused, minimized, pointer_inside) = ctx.input(|i| {
+                (
+                    i.viewport().focused.unwrap_or(false),
+                    i.viewport().minimized.unwrap_or(false),
+                    i.pointer.hover_pos().is_some(),
+                )
+            });
             let restored = self.last_window_minimized == Some(true) && !minimized;
             let activated = self.last_window_focused == Some(false) && focused;
             self.last_window_focused = Some(focused);
@@ -1590,8 +1597,11 @@ impl eframe::App for RustyDeskApp {
             }
         }
         self.process_bg_events(ctx);
-        if self.config.dreaming.enabled && !self.is_thinking && !self.dreaming_busy
-            && self.last_dreaming_attempt.elapsed() >= std::time::Duration::from_secs(120) {
+        if self.config.dreaming.enabled
+            && !self.is_thinking
+            && !self.dreaming_busy
+            && self.last_dreaming_attempt.elapsed() >= std::time::Duration::from_secs(120)
+        {
             self.spawn_dreaming(ctx.clone());
         }
         self.observe_empty_section();
@@ -1612,9 +1622,14 @@ impl eframe::App for RustyDeskApp {
         // Detect return from inactivity using only UI input delivered to Rusty.
         // No global keyboard listener, operating-system monitor or service.
         let user_active = ctx.input(|i| {
-            i.pointer.any_pressed() || i.pointer.delta().length_sq() > 9.0
-                || i.events.iter().any(|event| matches!(event,
-                    egui::Event::Key { pressed: true, .. } | egui::Event::Text(_)))
+            i.pointer.any_pressed()
+                || i.pointer.delta().length_sq() > 9.0
+                || i.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key { pressed: true, .. } | egui::Event::Text(_)
+                    )
+                })
         });
         if user_active {
             if let Some(event) = self.pet_presence.on_input(time) {
@@ -1623,11 +1638,17 @@ impl eframe::App for RustyDeskApp {
             self.pet_behavior.record_activity(time);
         }
 
-        let focus_session = if self.data.pomodoro.running
-            && self.data.pomodoro.phase == PomodoroPhase::Work {
-            self.data.pomodoro.active_session_id.as_deref()
-        } else { None };
-        let work_elapsed = self.data.pomodoro.work_minutes.saturating_mul(60)
+        let focus_session =
+            if self.data.pomodoro.running && self.data.pomodoro.phase == PomodoroPhase::Work {
+                self.data.pomodoro.active_session_id.as_deref()
+            } else {
+                None
+            };
+        let work_elapsed = self
+            .data
+            .pomodoro
+            .work_minutes
+            .saturating_mul(60)
             .saturating_sub(self.data.pomodoro.remaining_secs);
         if let Some(event) = self.pet_presence.on_focus(focus_session, work_elapsed) {
             self.emit_pet_event(event);
@@ -1639,7 +1660,9 @@ impl eframe::App for RustyDeskApp {
         let music_playing = self.music_player.is_playing();
         let ai_busy = self.is_thinking || self.md_is_converting;
         // An active Pomodoro is intentional focus, not inactivity/sleep.
-        let is_busy = ai_busy || self.active_recording.is_some() || music_playing
+        let is_busy = ai_busy
+            || self.active_recording.is_some()
+            || music_playing
             || self.data.pomodoro.running;
         // Local chat composition and model generation are the only writing cues.
         // No global keyboard hooks or inspection of other applications.
@@ -1755,12 +1778,7 @@ impl eframe::App for RustyDeskApp {
                             self.render_compact_island(ui, ctx, pointer_pos, accent, &pet_frame);
                         });
                     });
-                    frame9::paint_frame(
-                        ui.painter(),
-                        viewport,
-                        ctx,
-                        retro::BezelSize::Island,
-                    );
+                    frame9::paint_frame(ui.painter(), viewport, ctx, retro::BezelSize::Island);
                 });
             return;
         }
@@ -1890,8 +1908,12 @@ impl eframe::App for RustyDeskApp {
                                             format!("{pending} tareas pendientes")
                                         };
                                         ui.add(
-                                            egui::Label::new(RichText::new(status_text)
-                                                .size(11.5).color(retro::MUTED)).truncate(),
+                                            egui::Label::new(
+                                                RichText::new(status_text)
+                                                    .size(11.5)
+                                                    .color(retro::MUTED),
+                                            )
+                                            .truncate(),
                                         );
                                     });
                                 },
@@ -2020,25 +2042,20 @@ impl eframe::App for RustyDeskApp {
                             .auto_shrink([false, false])
                             .show(ui, |ui| self.render_music_tab(ui, ctx, accent));
                     } else {
-                    match self.active_tab {
-                        ActiveTab::Chat => self.render_chat_tab(ui, ctx, accent),
-                        ActiveTab::Tasks => self.render_tasks_tab(ui),
-                        ActiveTab::Habits => self.render_habits_tab(ui, accent),
-                        ActiveTab::Focus => self.render_focus_tab(ui, accent),
-                        ActiveTab::Music => unreachable!("Music handled by its scroll area"),
-                        ActiveTab::Organizer => self.render_organizer_tab(ui, accent),
-                        ActiveTab::Markdown => self.render_markdown_tab(ui, ctx, accent),
-                        ActiveTab::Compact => self.render_compact_tab(ui, ctx, accent),
-                        ActiveTab::Settings => self.render_settings_tab(ui, accent),
-                    }
+                        match self.active_tab {
+                            ActiveTab::Chat => self.render_chat_tab(ui, ctx, accent),
+                            ActiveTab::Tasks => self.render_tasks_tab(ui),
+                            ActiveTab::Habits => self.render_habits_tab(ui, accent),
+                            ActiveTab::Focus => self.render_focus_tab(ui, accent),
+                            ActiveTab::Music => unreachable!("Music handled by its scroll area"),
+                            ActiveTab::Organizer => self.render_organizer_tab(ui, accent),
+                            ActiveTab::Markdown => self.render_markdown_tab(ui, ctx, accent),
+                            ActiveTab::Compact => self.render_compact_tab(ui, ctx, accent),
+                            ActiveTab::Settings => self.render_settings_tab(ui, accent),
+                        }
                     }
                 });
-                frame9::paint_frame(
-                    ui.painter(),
-                    viewport,
-                    ctx,
-                    retro::BezelSize::Window,
-                );
+                frame9::paint_frame(ui.painter(), viewport, ctx, retro::BezelSize::Window);
             });
     }
 }
@@ -2150,7 +2167,10 @@ impl RustyDeskApp {
                     } else {
                         "Pausar"
                     };
-                    if ui.add_enabled(!cfg!(windows), egui::Button::new(pause_lbl)).clicked() {
+                    if ui
+                        .add_enabled(!cfg!(windows), egui::Button::new(pause_lbl))
+                        .clicked()
+                    {
                         self.music_player.toggle_pause();
                     }
                     if ui.small_button("Detener").clicked() {
@@ -2193,10 +2213,8 @@ impl RustyDeskApp {
         );
         frame9::paint_frame(painter, avail, ui.ctx(), retro::BezelSize::Notch);
         let sprite_area = interior.shrink(2.0);
-        let side = crate::ui::sprites::display_side(
-            sprite_area.width().min(sprite_area.height()),
-            96.0,
-        );
+        let side =
+            crate::ui::sprites::display_side(sprite_area.width().min(sprite_area.height()), 96.0);
         let sprite = egui::Rect::from_center_size(sprite_area.center(), Vec2::splat(side));
         crate::ui::sprites::paint_rusty(painter, sprite, ui.ctx(), frame, reduce, None);
     }
@@ -2226,54 +2244,68 @@ impl RustyDeskApp {
                         Vec2::new((ui.available_width() - 206.0).max(90.0), 48.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                        let pomo_active = self.data.pomodoro.phase != PomodoroPhase::Idle;
-                        let title_line = if pomo_active {
-                            let icon = match self.data.pomodoro.phase {
-                                PomodoroPhase::Work => "🎯",
-                                PomodoroPhase::Break => "☕",
-                                PomodoroPhase::Idle => "",
-                            };
-                            let pause_tag = if self.data.pomodoro.running {
-                                ""
+                            let pomo_active = self.data.pomodoro.phase != PomodoroPhase::Idle;
+                            let title_line = if pomo_active {
+                                let icon = match self.data.pomodoro.phase {
+                                    PomodoroPhase::Work => "🎯",
+                                    PomodoroPhase::Break => "☕",
+                                    PomodoroPhase::Idle => "",
+                                };
+                                let pause_tag = if self.data.pomodoro.running {
+                                    ""
+                                } else {
+                                    " (pausa)"
+                                };
+                                format!(
+                                    "{} {} {}{}",
+                                    self.config.assistant_name,
+                                    icon,
+                                    self.data.pomodoro.formatted_time(),
+                                    pause_tag
+                                )
                             } else {
-                                " (pausa)"
+                                self.config.assistant_name.clone()
                             };
-                            format!(
-                                "{} {} {}{}",
-                                self.config.assistant_name,
-                                icon,
-                                self.data.pomodoro.formatted_time(),
-                                pause_tag
-                            )
-                        } else {
-                            self.config.assistant_name.clone()
-                        };
-                        ui.add(egui::Label::new(
-                            RichText::new(title_line).strong().size(13.0).color(Color32::WHITE),
-                        ).truncate());
-                        let sub = if pomo_active && !self.data.pomodoro.running {
-                            "Enfoque pausado".to_string()
-                        } else if pomo_active {
-                            if let Some(t) = self.data.active_task_display_title() {
-                                truncate_chars(&t, 26)
-                            } else if self.data.pomodoro.phase == PomodoroPhase::Break {
-                                "Descanso".to_string()
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(title_line)
+                                        .strong()
+                                        .size(13.0)
+                                        .color(Color32::WHITE),
+                                )
+                                .truncate(),
+                            );
+                            let sub = if pomo_active && !self.data.pomodoro.running {
+                                "Enfoque pausado".to_string()
+                            } else if pomo_active {
+                                if let Some(t) = self.data.active_task_display_title() {
+                                    truncate_chars(&t, 26)
+                                } else if self.data.pomodoro.phase == PomodoroPhase::Break {
+                                    "Descanso".to_string()
+                                } else {
+                                    "Enfoque activo".to_string()
+                                }
+                            } else if let Some(prompt) = self.data.pomodoro.pending_prompt {
+                                match prompt {
+                                    PomodoroPrompt::WorkFinished => {
+                                        "¡Bloque terminado!".to_string()
+                                    }
+                                    PomodoroPrompt::BreakFinished => {
+                                        "Descanso terminado".to_string()
+                                    }
+                                }
+                            } else if self.is_thinking {
+                                "Pensando...".to_string()
                             } else {
-                                "Enfoque activo".to_string()
-                            }
-                        } else if let Some(prompt) = self.data.pomodoro.pending_prompt {
-                            match prompt {
-                                PomodoroPrompt::WorkFinished => "¡Bloque terminado!".to_string(),
-                                PomodoroPrompt::BreakFinished => "Descanso terminado".to_string(),
-                            }
-                        } else if self.is_thinking {
-                            "Pensando...".to_string()
-                        } else {
-                            let pending = self.data.tasks.iter().filter(|t| !t.done).count();
-                            format!("{pending} pendientes")
-                        };
-                        ui.add(egui::Label::new(RichText::new(sub).size(11.0).color(accent)).truncate());
-                    });
+                                let pending = self.data.tasks.iter().filter(|t| !t.done).count();
+                                format!("{pending} pendientes")
+                            };
+                            ui.add(
+                                egui::Label::new(RichText::new(sub).size(11.0).color(accent))
+                                    .truncate(),
+                            );
+                        },
+                    );
                 });
                 let drag_resp = self.handle_drag(ui, ctx, drag_area.response.rect);
                 if drag_resp.double_clicked() && !drag_resp.dragged() {
@@ -2366,7 +2398,8 @@ impl RustyDeskApp {
             if music_active {
                 ui.add_space(4.0);
                 let (bar, response) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width(), 18.0), egui::Sense::click(),
+                    Vec2::new(ui.available_width(), 18.0),
+                    egui::Sense::click(),
                 );
                 let bar_color = if response.hovered() || self.island_music_open {
                     BUTTON_HOVER
@@ -2374,18 +2407,22 @@ impl RustyDeskApp {
                     BUTTON
                 };
                 ui.painter().rect_filled(bar, 0.0, bar_color);
-                ui.painter().rect_stroke(bar, 0.0, Stroke::new(1.0, retro::BORDER));
+                ui.painter()
+                    .rect_stroke(bar, 0.0, Stroke::new(1.0, retro::BORDER));
                 paint_pixel_icon(
                     ui.painter(),
                     egui::Rect::from_center_size(bar.center(), Vec2::splat(14.0)),
                     PixelIcon::MusicNote,
                     accent,
                 );
-                if response.on_hover_text(if self.island_music_open {
-                    "Ocultar reproductor"
-                } else {
-                    "Mostrar reproductor"
-                }).clicked() {
+                if response
+                    .on_hover_text(if self.island_music_open {
+                        "Ocultar reproductor"
+                    } else {
+                        "Mostrar reproductor"
+                    })
+                    .clicked()
+                {
                     self.island_music_open = !self.island_music_open;
                     self.island_sm.invalidate_geometry();
                 }
@@ -3150,7 +3187,10 @@ impl RustyDeskApp {
                 egui::TextEdit::singleline(&mut self.new_habit_icon),
             );
             ui.add_sized(
-                [180.0_f32.min((ui.available_width() - 145.0).max(105.0)), 24.0],
+                [
+                    180.0_f32.min((ui.available_width() - 145.0).max(105.0)),
+                    24.0,
+                ],
                 egui::TextEdit::singleline(&mut self.new_habit_name).hint_text("Ej. Leer páginas"),
             );
             ui.add(egui::DragValue::new(&mut self.new_habit_goal).range(1..=100));
@@ -3734,52 +3774,92 @@ impl RustyDeskApp {
             // Keep the island music controls on two predictable rows:
             // track + transport, then volume. No wrapping or offscreen buttons.
             ui.horizontal(|ui| {
-                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
+                let (icon_rect, _) =
+                    ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
                 paint_pixel_icon(ui.painter(), icon_rect, PixelIcon::MusicNote, accent);
                 let transport_width = if has_multiple { 182.0 } else { 100.0 };
                 let title_width = (ui.available_width() - transport_width).max(60.0);
-                let (title_rect, title_response) = ui.allocate_exact_size(
-                    Vec2::new(title_width, 30.0), egui::Sense::hover(),
-                );
+                let (title_rect, title_response) =
+                    ui.allocate_exact_size(Vec2::new(title_width, 30.0), egui::Sense::hover());
                 let font = egui::FontId::monospace(11.5);
-                let galley = ui.painter().layout_no_wrap(title.clone(), font, Color32::WHITE);
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(title.clone(), font, Color32::WHITE);
                 let text_width = galley.size().x;
                 let x = if text_width > title_rect.width() && !self.config.pet.reduce_animations {
                     // Retro marquee: enter from the left, exit right, repeat without changing layout.
                     let travel = title_rect.width() + text_width + 12.0;
                     let elapsed = ui.ctx().input(|i| i.time) as f32;
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(33));
                     title_rect.min.x - text_width + (elapsed * 34.0).rem_euclid(travel)
                 } else {
                     title_rect.min.x
                 };
                 let y = title_rect.center().y - galley.size().y * 0.5;
                 ui.painter().with_clip_rect(title_rect).galley(
-                    Pos2::new(x, y), galley, Color32::WHITE,
+                    Pos2::new(x, y),
+                    galley,
+                    Color32::WHITE,
                 );
                 title_response.on_hover_text(&title);
-                if has_multiple && pixel_button(
-                    ui, PixelIcon::PrevTrack, "", BUTTON, IVORY, "Pista anterior",
-                ).clicked() {
+                if has_multiple
+                    && pixel_button(
+                        ui,
+                        PixelIcon::PrevTrack,
+                        "",
+                        BUTTON,
+                        IVORY,
+                        "Pista anterior",
+                    )
+                    .clicked()
+                {
                     self.play_prev_music_track();
                 }
                 // Windows cannot pause the external player yet: keep the button disabled.
-                if ui.add_enabled_ui(!cfg!(windows), |ui| pixel_button(
-                    ui,
-                    if is_paused { PixelIcon::Play } else { PixelIcon::Pause },
-                    "", BUTTON, IVORY,
-                    if is_paused { "Reanudar" } else { "Pausar" },
-                )).inner.clicked() {
+                if ui
+                    .add_enabled_ui(!cfg!(windows), |ui| {
+                        pixel_button(
+                            ui,
+                            if is_paused {
+                                PixelIcon::Play
+                            } else {
+                                PixelIcon::Pause
+                            },
+                            "",
+                            BUTTON,
+                            IVORY,
+                            if is_paused { "Reanudar" } else { "Pausar" },
+                        )
+                    })
+                    .inner
+                    .clicked()
+                {
                     self.music_player.toggle_pause();
                 }
                 if pixel_button(
-                    ui, PixelIcon::Stop, "", retro::DANGER, IVORY, "Detener música",
-                ).clicked() {
+                    ui,
+                    PixelIcon::Stop,
+                    "",
+                    retro::DANGER,
+                    IVORY,
+                    "Detener música",
+                )
+                .clicked()
+                {
                     self.stop_music();
                 }
-                if has_multiple && pixel_button(
-                    ui, PixelIcon::NextTrack, "", BUTTON, IVORY, "Siguiente pista",
-                ).clicked() {
+                if has_multiple
+                    && pixel_button(
+                        ui,
+                        PixelIcon::NextTrack,
+                        "",
+                        BUTTON,
+                        IVORY,
+                        "Siguiente pista",
+                    )
+                    .clicked()
+                {
                     self.play_next_music_track_manual();
                 }
             });
@@ -3793,103 +3873,107 @@ impl RustyDeskApp {
         ui.vertical(|ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                let (icon_rect, _) =
-                    ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
-                paint_pixel_icon(ui.painter(), icon_rect, PixelIcon::MusicNote, accent);
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(Vec2::splat(13.0), egui::Sense::hover());
+                    paint_pixel_icon(ui.painter(), icon_rect, PixelIcon::MusicNote, accent);
 
-                let remaining = ui.available_width();
-                let title_w = if compact_island {
-                    remaining.max(60.0)
-                } else {
-                    (remaining - if has_multiple { 122.0 } else { 62.0 } - 140.0).max(60.0)
-                };
+                    let remaining = ui.available_width();
+                    let title_w = if compact_island {
+                        remaining.max(60.0)
+                    } else {
+                        (remaining - if has_multiple { 122.0 } else { 62.0 } - 140.0).max(60.0)
+                    };
 
-                ui.allocate_ui_with_layout(
-                    Vec2::new(title_w, 22.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let lbl = ui.add(
-                            egui::Label::new(
-                                RichText::new(&title).size(11.5).color(Color32::WHITE),
-                            )
-                            .truncate()
-                            .sense(if compact_island {
-                                egui::Sense::hover()
-                            } else {
-                                egui::Sense::click()
-                            }),
-                        );
-                        if !compact_island && lbl.clicked() {
-                            self.active_tab = ActiveTab::Music;
-                        }
-                    },
-                );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(title_w, 22.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let lbl = ui.add(
+                                egui::Label::new(
+                                    RichText::new(&title).size(11.5).color(Color32::WHITE),
+                                )
+                                .truncate()
+                                .sense(if compact_island {
+                                    egui::Sense::hover()
+                                } else {
+                                    egui::Sense::click()
+                                }),
+                            );
+                            if !compact_island && lbl.clicked() {
+                                self.active_tab = ActiveTab::Music;
+                            }
+                        },
+                    );
                 });
 
                 ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if has_multiple
-                        && pixel_button(
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if has_multiple
+                            && pixel_button(
+                                ui,
+                                PixelIcon::NextTrack,
+                                "",
+                                Color32::from_rgb(30, 41, 59),
+                                Color32::WHITE,
+                                "Siguiente pista",
+                            )
+                            .clicked()
+                        {
+                            self.play_next_music_track_manual();
+                        }
+
+                        if pixel_button(
                             ui,
-                            PixelIcon::NextTrack,
+                            PixelIcon::Stop,
                             "",
-                            Color32::from_rgb(30, 41, 59),
+                            Color32::from_rgb(153, 27, 27),
                             Color32::WHITE,
-                            "Siguiente pista",
+                            "Detener música",
                         )
                         .clicked()
-                    {
-                        self.play_next_music_track_manual();
-                    }
+                        {
+                            self.stop_music();
+                        }
 
-                    if pixel_button(
-                        ui,
-                        PixelIcon::Stop,
-                        "",
-                        Color32::from_rgb(153, 27, 27),
-                        Color32::WHITE,
-                        "Detener música",
-                    )
-                    .clicked()
-                    {
-                        self.stop_music();
-                    }
+                        if ui
+                            .add_enabled_ui(!cfg!(windows), |ui| {
+                                pixel_button(
+                                    ui,
+                                    if is_paused {
+                                        PixelIcon::Play
+                                    } else {
+                                        PixelIcon::Pause
+                                    },
+                                    "",
+                                    Color32::from_rgb(30, 41, 59),
+                                    Color32::WHITE,
+                                    if is_paused { "Reanudar" } else { "Pausar" },
+                                )
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            self.music_player.toggle_pause();
+                        }
 
-                    if ui.add_enabled_ui(!cfg!(windows), |ui| pixel_button(
-                        ui,
-                        if is_paused {
-                            PixelIcon::Play
-                        } else {
-                            PixelIcon::Pause
-                        },
-                        "",
-                        Color32::from_rgb(30, 41, 59),
-                        Color32::WHITE,
-                        if is_paused { "Reanudar" } else { "Pausar" },
-                    )).inner
-                    .clicked()
-                    {
-                        self.music_player.toggle_pause();
-                    }
+                        if has_multiple
+                            && pixel_button(
+                                ui,
+                                PixelIcon::PrevTrack,
+                                "",
+                                Color32::from_rgb(30, 41, 59),
+                                Color32::WHITE,
+                                "Pista anterior",
+                            )
+                            .clicked()
+                        {
+                            self.play_prev_music_track();
+                        }
 
-                    if has_multiple
-                        && pixel_button(
-                            ui,
-                            PixelIcon::PrevTrack,
-                            "",
-                            Color32::from_rgb(30, 41, 59),
-                            Color32::WHITE,
-                            "Pista anterior",
-                        )
-                        .clicked()
-                    {
-                        self.play_prev_music_track();
-                    }
-
-                    if !compact_island {
-                        self.render_volume_controls(ui, 68.0, true);
-                    }
-                });
+                        if !compact_island {
+                            self.render_volume_controls(ui, 68.0, true);
+                        }
+                    });
                 });
             });
 
@@ -3922,78 +4006,89 @@ impl RustyDeskApp {
         });
         ui.separator();
         if self.music_show_add {
-        ui.label(RichText::new("Agregar playlist (.m3u / .m3u8)").strong());
-        // Stack the input above its actions. Fixed-width horizontal controls
-        // previously pushed "Elegir .m3u" outside narrow windows.
-        ui.vertical(|ui| {
-            let input_resp = ui.add_sized(
-                [ui.available_width(), 26.0],
-                egui::TextEdit::singleline(&mut self.music_m3u_path_input)
-                    .hint_text("Ruta al archivo .m3u..."),
-            );
-            let enter = input_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            ui.horizontal_wrapped(|ui| {
-                if (pixel_button(
-                    ui,
-                    PixelIcon::Save,
-                    "Agregar",
-                    accent,
-                    Color32::from_rgb(15, 20, 32),
-                    "Importar archivo .m3u a SQLite",
-                ).clicked() || enter) && !self.music_m3u_path_input.trim().is_empty() {
-                    let trimmed = self.music_m3u_path_input.trim().to_string();
-                    if music::is_remote_or_uri(&trimmed) {
-                        self.add_music_url_from_input(&trimmed, None);
-                        self.music_m3u_path_input.clear();
-                    } else {
-                        let p = PathBuf::from(trimmed);
-                        self.import_m3u_from_path(&p);
+            ui.label(RichText::new("Agregar playlist (.m3u / .m3u8)").strong());
+            // Stack the input above its actions. Fixed-width horizontal controls
+            // previously pushed "Elegir .m3u" outside narrow windows.
+            ui.vertical(|ui| {
+                let input_resp = ui.add_sized(
+                    [ui.available_width(), 26.0],
+                    egui::TextEdit::singleline(&mut self.music_m3u_path_input)
+                        .hint_text("Ruta al archivo .m3u..."),
+                );
+                let enter =
+                    input_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal_wrapped(|ui| {
+                    if (pixel_button(
+                        ui,
+                        PixelIcon::Save,
+                        "Agregar",
+                        accent,
+                        Color32::from_rgb(15, 20, 32),
+                        "Importar archivo .m3u a SQLite",
+                    )
+                    .clicked()
+                        || enter)
+                        && !self.music_m3u_path_input.trim().is_empty()
+                    {
+                        let trimmed = self.music_m3u_path_input.trim().to_string();
+                        if music::is_remote_or_uri(&trimmed) {
+                            self.add_music_url_from_input(&trimmed, None);
+                            self.music_m3u_path_input.clear();
+                        } else {
+                            let p = PathBuf::from(trimmed);
+                            self.import_m3u_from_path(&p);
+                        }
                     }
-                }
-                if pixel_button(
-                    ui,
-                    PixelIcon::Attach,
-                    "Elegir .m3u",
-                    Color32::from_rgb(30, 41, 59),
-                    Color32::WHITE,
-                    "Buscar archivo .m3u en el sistema",
-                ).clicked() {
-                    self.spawn_m3u_picker(ctx);
-                }
+                    if pixel_button(
+                        ui,
+                        PixelIcon::Attach,
+                        "Elegir .m3u",
+                        Color32::from_rgb(30, 41, 59),
+                        Color32::WHITE,
+                        "Buscar archivo .m3u en el sistema",
+                    )
+                    .clicked()
+                    {
+                        self.spawn_m3u_picker(ctx);
+                    }
+                });
             });
-        });
 
-        ui.add_space(6.0);
-        ui.label(RichText::new("Agregar URL (radio / stream / audio)").strong());
-        ui.vertical(|ui| {
-            let url_resp = ui.add_sized(
-                [ui.available_width(), 26.0],
-                egui::TextEdit::singleline(&mut self.music_url_input)
-                    .hint_text("https://... (stream o audio)"),
-            );
-            let title_resp = ui.add_sized(
-                [ui.available_width(), 26.0],
-                egui::TextEdit::singleline(&mut self.music_url_title_input)
-                    .hint_text("Nombre (opcional)"),
-            );
-            let enter = (url_resp.lost_focus() || title_resp.lost_focus())
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            ui.horizontal(|ui| {
-                if (pixel_button(
-                    ui,
-                    PixelIcon::Save,
-                    "Guardar URL",
-                    accent,
-                    Color32::from_rgb(15, 20, 32),
-                    "Guardar URL en SQLite",
-                ).clicked() || enter) && !self.music_url_input.trim().is_empty() {
-                    let url = self.music_url_input.clone();
-                    let title = self.music_url_title_input.clone();
-                    self.add_music_url_from_input(&url, Some(&title));
-                }
+            ui.add_space(6.0);
+            ui.label(RichText::new("Agregar URL (radio / stream / audio)").strong());
+            ui.vertical(|ui| {
+                let url_resp = ui.add_sized(
+                    [ui.available_width(), 26.0],
+                    egui::TextEdit::singleline(&mut self.music_url_input)
+                        .hint_text("https://... (stream o audio)"),
+                );
+                let title_resp = ui.add_sized(
+                    [ui.available_width(), 26.0],
+                    egui::TextEdit::singleline(&mut self.music_url_title_input)
+                        .hint_text("Nombre (opcional)"),
+                );
+                let enter = (url_resp.lost_focus() || title_resp.lost_focus())
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.horizontal(|ui| {
+                    if (pixel_button(
+                        ui,
+                        PixelIcon::Save,
+                        "Guardar URL",
+                        accent,
+                        Color32::from_rgb(15, 20, 32),
+                        "Guardar URL en SQLite",
+                    )
+                    .clicked()
+                        || enter)
+                        && !self.music_url_input.trim().is_empty()
+                    {
+                        let url = self.music_url_input.clone();
+                        let title = self.music_url_title_input.clone();
+                        self.add_music_url_from_input(&url, Some(&title));
+                    }
+                });
             });
-        });
-        return;
+            return;
         }
 
         ui.add_space(6.0);
@@ -4001,82 +4096,86 @@ impl RustyDeskApp {
         let is_active = self.music_player.is_active();
         let is_paused = self.music_player.is_paused();
         if !is_active {
-        egui::Frame::none()
-            .fill(Color32::from_rgb(20, 27, 45))
-            .rounding(0.0)
-            .inner_margin(8.0)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if !is_active {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(20, 27, 45))
+                .rounding(0.0)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if !is_active {
+                            if pixel_button(
+                                ui,
+                                PixelIcon::Play,
+                                "Play",
+                                Color32::from_rgb(22, 163, 74),
+                                Color32::WHITE,
+                                "Reproducir pista seleccionada o primera",
+                            )
+                            .clicked()
+                            {
+                                let idx = self.music_current_track_idx.unwrap_or(0);
+                                self.play_music_track_at(idx);
+                            }
+                        } else if ui
+                            .add_enabled_ui(!cfg!(windows), |ui| {
+                                pixel_button(
+                                    ui,
+                                    if is_paused {
+                                        PixelIcon::Play
+                                    } else {
+                                        PixelIcon::Pause
+                                    },
+                                    if is_paused { "Seguir" } else { "Pausa" },
+                                    Color32::from_rgb(30, 64, 175),
+                                    Color32::WHITE,
+                                    if is_paused {
+                                        "Reanudar reproducción"
+                                    } else {
+                                        "Pausar reproducción"
+                                    },
+                                )
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            self.music_player.toggle_pause();
+                        }
                         if pixel_button(
                             ui,
-                            PixelIcon::Play,
-                            "Play",
-                            Color32::from_rgb(22, 163, 74),
+                            PixelIcon::Stop,
+                            "Stop",
+                            Color32::from_rgb(153, 27, 27),
                             Color32::WHITE,
-                            "Reproducir pista seleccionada o primera",
+                            "Detener reproducción",
                         )
                         .clicked()
                         {
-                            let idx = self.music_current_track_idx.unwrap_or(0);
-                            self.play_music_track_at(idx);
+                            self.stop_music();
                         }
-                    } else if ui.add_enabled_ui(!cfg!(windows), |ui| pixel_button(
-                        ui,
-                        if is_paused {
-                            PixelIcon::Play
-                        } else {
-                            PixelIcon::Pause
-                        },
-                        if is_paused { "Seguir" } else { "Pausa" },
-                        Color32::from_rgb(30, 64, 175),
-                        Color32::WHITE,
-                        if is_paused {
-                            "Reanudar reproducción"
-                        } else {
-                            "Pausar reproducción"
-                        },
-                    )).inner
-                    .clicked()
-                    {
-                        self.music_player.toggle_pause();
-                    }
-                    if pixel_button(
-                        ui,
-                        PixelIcon::Stop,
-                        "Stop",
-                        Color32::from_rgb(153, 27, 27),
-                        Color32::WHITE,
-                        "Detener reproducción",
-                    )
-                    .clicked()
-                    {
-                        self.stop_music();
-                    }
 
-                    ui.add_space(6.0);
-                    self.render_volume_controls(ui, 100.0, true);
+                        ui.add_space(6.0);
+                        self.render_volume_controls(ui, 100.0, true);
+                    });
+
+                    let now_playing = match (is_active, is_paused, self.music_current_track_idx) {
+                        (true, true, Some(idx)) => self
+                            .music_tracks
+                            .get(idx)
+                            .map(|t| format!("⏸ {} (en pausa)", t.title))
+                            .unwrap_or_else(|| "⏸ En pausa".to_string()),
+                        (true, false, Some(idx)) => self
+                            .music_tracks
+                            .get(idx)
+                            .map(|t| format!("▶ {}", t.title))
+                            .unwrap_or_else(|| "▶ Reproduciendo".to_string()),
+                        _ => self
+                            .music_status
+                            .clone()
+                            .unwrap_or_else(|| "Sin reproducción activa.".to_string()),
+                    };
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(now_playing).size(11.5).color(accent));
                 });
-
-                let now_playing = match (is_active, is_paused, self.music_current_track_idx) {
-                    (true, true, Some(idx)) => self
-                        .music_tracks
-                        .get(idx)
-                        .map(|t| format!("⏸ {} (en pausa)", t.title))
-                        .unwrap_or_else(|| "⏸ En pausa".to_string()),
-                    (true, false, Some(idx)) => self
-                        .music_tracks
-                        .get(idx)
-                        .map(|t| format!("▶ {}", t.title))
-                        .unwrap_or_else(|| "▶ Reproduciendo".to_string()),
-                    _ => self
-                        .music_status
-                        .clone()
-                        .unwrap_or_else(|| "Sin reproducción activa.".to_string()),
-                };
-                ui.add_space(4.0);
-                ui.label(RichText::new(now_playing).size(11.5).color(accent));
-            });
         }
 
         ui.add_space(6.0);
@@ -4095,40 +4194,41 @@ impl RustyDeskApp {
             );
         } else {
             ui.vertical(|ui| {
-                    for pl in &self.data.playlists {
-                        let is_selected = self
-                            .music_selected_playlist_id
-                            .as_deref()
-                            .is_some_and(|id| id == pl.id);
-                        ui.horizontal(|ui| {
-                            let label = format!("{} ({} pistas)", pl.name, pl.track_count);
-                            let title_width = (ui.available_width() - 45.0).max(90.0);
-                            if ui.add_sized(
+                for pl in &self.data.playlists {
+                    let is_selected = self
+                        .music_selected_playlist_id
+                        .as_deref()
+                        .is_some_and(|id| id == pl.id);
+                    ui.horizontal(|ui| {
+                        let label = format!("{} ({} pistas)", pl.name, pl.track_count);
+                        let title_width = (ui.available_width() - 45.0).max(90.0);
+                        if ui
+                            .add_sized(
                                 [title_width, 25.0],
                                 egui::SelectableLabel::new(is_selected, label),
-                            ).on_hover_text(&pl.name).clicked() {
-                                selected_to_load = Some(pl.id.clone());
+                            )
+                            .on_hover_text(&pl.name)
+                            .clicked()
+                        {
+                            selected_to_load = Some(pl.id.clone());
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if pixel_button(
+                                ui,
+                                PixelIcon::Clear,
+                                "",
+                                Color32::from_rgb(127, 29, 29),
+                                Color32::WHITE,
+                                "Eliminar playlist",
+                            )
+                            .clicked()
+                            {
+                                playlist_to_delete = Some(pl.id.clone());
                             }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if pixel_button(
-                                        ui,
-                                        PixelIcon::Clear,
-                                        "",
-                                        Color32::from_rgb(127, 29, 29),
-                                        Color32::WHITE,
-                                        "Eliminar playlist",
-                                    )
-                                    .clicked()
-                                    {
-                                        playlist_to_delete = Some(pl.id.clone());
-                                    }
-                                },
-                            );
                         });
-                    }
-                });
+                    });
+                }
+            });
         }
 
         if let Some(id) = selected_to_load {
@@ -4152,54 +4252,52 @@ impl RustyDeskApp {
         let mut clicked_track: Option<usize> = None;
         let mut track_to_delete: Option<(usize, String, String)> = None;
         ui.vertical(|ui| {
-                if self.music_tracks.is_empty() {
-                    ui.label(
-                        RichText::new("Seleccioná una playlist para ver sus pistas.")
-                            .size(11.5)
-                            .color(Color32::GRAY),
-                    );
-                } else {
-                    for (idx, track) in self.music_tracks.iter().enumerate() {
-                        let active = self.music_current_track_idx == Some(idx);
-                        let label = match track.duration_secs {
-                            Some(d) => {
-                                format!("{}. {} ({}:{:02})", idx + 1, track.title, d / 60, d % 60)
-                            }
-                            None => format!("{}. {}", idx + 1, track.title),
-                        };
-                        ui.horizontal(|ui| {
-                            let title_width = (ui.available_width() - 45.0).max(90.0);
-                            if ui.add_sized(
+            if self.music_tracks.is_empty() {
+                ui.label(
+                    RichText::new("Seleccioná una playlist para ver sus pistas.")
+                        .size(11.5)
+                        .color(Color32::GRAY),
+                );
+            } else {
+                for (idx, track) in self.music_tracks.iter().enumerate() {
+                    let active = self.music_current_track_idx == Some(idx);
+                    let label = match track.duration_secs {
+                        Some(d) => {
+                            format!("{}. {} ({}:{:02})", idx + 1, track.title, d / 60, d % 60)
+                        }
+                        None => format!("{}. {}", idx + 1, track.title),
+                    };
+                    ui.horizontal(|ui| {
+                        let title_width = (ui.available_width() - 45.0).max(90.0);
+                        if ui
+                            .add_sized(
                                 [title_width, 25.0],
                                 egui::SelectableLabel::new(active, label),
-                            ).on_hover_text(&track.title).clicked() {
-                                clicked_track = Some(idx);
+                            )
+                            .on_hover_text(&track.title)
+                            .clicked()
+                        {
+                            clicked_track = Some(idx);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if pixel_button(
+                                ui,
+                                PixelIcon::Clear,
+                                "",
+                                Color32::from_rgb(127, 29, 29),
+                                Color32::WHITE,
+                                "Eliminar pista",
+                            )
+                            .clicked()
+                            {
+                                track_to_delete =
+                                    Some((idx, track.playlist_id.clone(), track.id.clone()));
                             }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if pixel_button(
-                                        ui,
-                                        PixelIcon::Clear,
-                                        "",
-                                        Color32::from_rgb(127, 29, 29),
-                                        Color32::WHITE,
-                                        "Eliminar pista",
-                                    )
-                                    .clicked()
-                                    {
-                                        track_to_delete = Some((
-                                            idx,
-                                            track.playlist_id.clone(),
-                                            track.id.clone(),
-                                        ));
-                                    }
-                                },
-                            );
                         });
-                    }
+                    });
                 }
-            });
+            }
+        });
 
         if let Some((idx, playlist_id, track_id)) = track_to_delete {
             if self.music_current_track_idx == Some(idx) {
@@ -4930,7 +5028,9 @@ impl RustyDeskApp {
                 self.spawn_provider_test(SearchProviderId::LangSearch);
             }
         });
-        ui.label("LangSearch tiene una cuota gratuita de tokens diarios; Rusty usa resultados breves.");
+        ui.label(
+            "LangSearch tiene una cuota gratuita de tokens diarios; Rusty usa resultados breves.",
+        );
 
         if let Some(status) = &self.provider_test_status {
             ui.add_space(4.0);
@@ -4968,13 +5068,17 @@ impl RustyDeskApp {
     }
 
     fn spawn_dreaming(&mut self, ctx: egui::Context) {
-        if self.dreaming_busy || !self.config.dreaming.enabled { return; }
+        if self.dreaming_busy || !self.config.dreaming.enabled {
+            return;
+        }
         self.dreaming_busy = true;
         self.last_dreaming_attempt = std::time::Instant::now();
         let cfg = self.config.dreaming.clone();
         let tx = self.bg_tx.clone();
         self.rt.spawn(async move {
-            let result = crate::dreaming::run_once(cfg).await.map_err(|e| e.to_string());
+            let result = crate::dreaming::run_once(cfg)
+                .await
+                .map_err(|e| e.to_string());
             let _ = tx.send(BgEvent::DreamingDone(result));
             ctx.request_repaint();
         });
@@ -4985,18 +5089,44 @@ impl RustyDeskApp {
         ui.label("Un modelo independiente lee el historial y guarda recuerdos. Gemini solo los consulta.");
         ui.checkbox(&mut self.config.dreaming.enabled, "Activar Dreaming");
         ui.horizontal_wrapped(|ui| {
-            if ui.small_button("LM Studio").clicked() { self.config.dreaming.base_url = "http://localhost:1234/v1".into(); }
-            if ui.small_button("Ollama").clicked() { self.config.dreaming.base_url = "http://localhost:11434/v1".into(); }
-            if ui.small_button("Gemini").clicked() { self.config.dreaming.base_url = "https://generativelanguage.googleapis.com/v1beta".into(); }
+            if ui.small_button("LM Studio").clicked() {
+                self.config.dreaming.base_url = "http://localhost:1234/v1".into();
+            }
+            if ui.small_button("Ollama").clicked() {
+                self.config.dreaming.base_url = "http://localhost:11434/v1".into();
+            }
+            if ui.small_button("Gemini").clicked() {
+                self.config.dreaming.base_url =
+                    "https://generativelanguage.googleapis.com/v1beta".into();
+            }
         });
-        egui::Grid::new("dreaming_config").num_columns(2).show(ui, |ui| {
-            ui.label("URL API:"); ui.text_edit_singleline(&mut self.config.dreaming.base_url); ui.end_row();
-            ui.label("Modelo:"); ui.text_edit_singleline(&mut self.config.dreaming.model); ui.end_row();
-            ui.label("API Key:"); ui.add(egui::TextEdit::singleline(&mut self.config.dreaming.api_key).password(true)); ui.end_row();
-        });
-        ui.checkbox(&mut self.config.dreaming.allow_remote, "Permito enviar conversaciones a este proveedor remoto");
+        egui::Grid::new("dreaming_config")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("URL API:");
+                ui.text_edit_singleline(&mut self.config.dreaming.base_url);
+                ui.end_row();
+                ui.label("Modelo:");
+                ui.text_edit_singleline(&mut self.config.dreaming.model);
+                ui.end_row();
+                ui.label("API Key:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.config.dreaming.api_key).password(true),
+                );
+                ui.end_row();
+            });
+        ui.checkbox(
+            &mut self.config.dreaming.allow_remote,
+            "Permito enviar conversaciones a este proveedor remoto",
+        );
         ui.label("Las APIs externas requieren HTTPS. Dreaming se ejecuta en segundo plano y guarda solo recuerdos breves.");
-        if ui.add_enabled(self.config.dreaming.enabled && !self.dreaming_busy, egui::Button::new("Procesar historial ahora")).clicked() {
+        if ui
+            .add_enabled(
+                self.config.dreaming.enabled && !self.dreaming_busy,
+                egui::Button::new("Procesar historial ahora"),
+            )
+            .clicked()
+        {
             if let Err(e) = crate::dreaming::validate_config(&self.config.dreaming) {
                 self.status_banner = Some(e.to_string());
             } else if let Err(e) = self.config.save() {
@@ -5005,18 +5135,29 @@ impl RustyDeskApp {
                 self.spawn_dreaming(ui.ctx().clone());
             }
         }
-        if self.dreaming_busy { ui.spinner(); ui.label("Analizando recuerdos..."); }
+        if self.dreaming_busy {
+            ui.spinner();
+            ui.label("Analizando recuerdos...");
+        }
         ui.separator();
         ui.label(RichText::new("Recuerdos guardados").strong());
-        let memories = self.data.db.as_ref().and_then(|db| db.dreaming_list_memories().ok()).unwrap_or_default();
-        if memories.is_empty() { ui.label("Todavía no hay recuerdos."); }
+        let memories = self
+            .data
+            .db
+            .as_ref()
+            .and_then(|db| db.dreaming_list_memories().ok())
+            .unwrap_or_default();
+        if memories.is_empty() {
+            ui.label("Todavía no hay recuerdos.");
+        }
         for (id, content) in memories {
             ui.horizontal_wrapped(|ui| {
                 ui.label(content);
                 if ui.small_button("Eliminar").clicked() {
                     if let Some(db) = &self.data.db {
                         if let Err(e) = db.dreaming_delete_memory(&id) {
-                            self.status_banner = Some(format!("No se pudo borrar el recuerdo: {e}"));
+                            self.status_banner =
+                                Some(format!("No se pudo borrar el recuerdo: {e}"));
                         }
                     }
                 }

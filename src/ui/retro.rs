@@ -79,10 +79,26 @@ fn corner_arms(rect: Rect, corner: f32, right: bool, bottom: bool, step: u32) ->
     let unit = 2.0;
     let offset = step as f32 * unit;
     let length = corner - offset;
-    let px = if right { rect.right() - offset - length } else { rect.left() + offset };
-    let py = if bottom { rect.bottom() - offset - unit } else { rect.top() + offset };
-    let vx = if right { rect.right() - offset - unit } else { rect.left() + offset };
-    let vy = if bottom { rect.bottom() - offset - length } else { rect.top() + offset };
+    let px = if right {
+        rect.right() - offset - length
+    } else {
+        rect.left() + offset
+    };
+    let py = if bottom {
+        rect.bottom() - offset - unit
+    } else {
+        rect.top() + offset
+    };
+    let vx = if right {
+        rect.right() - offset - unit
+    } else {
+        rect.left() + offset
+    };
+    let vy = if bottom {
+        rect.bottom() - offset - length
+    } else {
+        rect.top() + offset
+    };
     (
         Rect::from_min_size(Pos2::new(px, py), Vec2::new(length, unit)),
         Rect::from_min_size(Pos2::new(vx, vy), Vec2::new(unit, length)),
@@ -142,11 +158,27 @@ pub fn paint_oxidized_bezel(painter: &egui::Painter, rect: Rect, size: BezelSize
         if !matches!(size, BezelSize::Notch) {
             let axis = (rail / 2.0).floor() + 1.0;
             let center = Pos2::new(
-                if right { rect.right() - axis } else { rect.left() + axis },
-                if bottom { rect.bottom() - axis } else { rect.top() + axis },
+                if right {
+                    rect.right() - axis
+                } else {
+                    rect.left() + axis
+                },
+                if bottom {
+                    rect.bottom() - axis
+                } else {
+                    rect.top() + axis
+                },
             );
-            painter.rect_filled(Rect::from_center_size(center, Vec2::splat(6.0)), 0.0, steel_shadow);
-            painter.rect_filled(Rect::from_center_size(center, Vec2::splat(4.0)), 0.0, GOLD_DARK);
+            painter.rect_filled(
+                Rect::from_center_size(center, Vec2::splat(6.0)),
+                0.0,
+                steel_shadow,
+            );
+            painter.rect_filled(
+                Rect::from_center_size(center, Vec2::splat(4.0)),
+                0.0,
+                GOLD_DARK,
+            );
             painter.line_segment(
                 [center + Vec2::new(-1.0, 1.0), center + Vec2::new(1.0, -1.0)],
                 Stroke::new(1.0, steel_shadow),
@@ -159,9 +191,16 @@ pub fn paint_oxidized_bezel(painter: &egui::Painter, rect: Rect, size: BezelSize
         for n in 0..18 {
             let t = (n as f32 + 0.6) / 19.0;
             let x = rect.left() + rect.width() * t;
-            let y = if n % 2 == 0 { rect.top() + 4.0 } else { rect.bottom() - 6.0 };
+            let y = if n % 2 == 0 {
+                rect.top() + 4.0
+            } else {
+                rect.bottom() - 6.0
+            };
             painter.rect_filled(
-                Rect::from_min_size(Pos2::new(x, y), Vec2::splat(if n % 3 == 0 { 3.0 } else { 2.0 })),
+                Rect::from_min_size(
+                    Pos2::new(x, y),
+                    Vec2::splat(if n % 3 == 0 { 3.0 } else { 2.0 }),
+                ),
                 0.0,
                 if n % 4 == 0 { OXIDE_COPPER } else { OXIDE_DARK },
             );

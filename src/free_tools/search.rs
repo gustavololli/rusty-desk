@@ -260,15 +260,27 @@ pub fn parse_langsearch_response(
         FreeToolError::ProviderUnavailable("Respuesta JSON inesperada de LangSearch.".to_string())
     })?;
     let pages = parsed.data.and_then(|d| d.web_pages).ok_or_else(|| {
-        FreeToolError::ProviderUnavailable("LangSearch no devolvió la sección webPages.".to_string())
+        FreeToolError::ProviderUnavailable(
+            "LangSearch no devolvió la sección webPages.".to_string(),
+        )
     })?;
-    let results = pages.value.into_iter()
+    let results = pages
+        .value
+        .into_iter()
         .filter(|r| !r.url.trim().is_empty())
         .take(max_results)
         .map(|r| SearchResult {
-            title: if r.name.trim().is_empty() { r.url.trim().to_string() } else { r.name.trim().to_string() },
+            title: if r.name.trim().is_empty() {
+                r.url.trim().to_string()
+            } else {
+                r.name.trim().to_string()
+            },
             url: r.url.trim().to_string(),
-            snippet: if r.snippet.trim().is_empty() { r.text.trim().to_string() } else { r.snippet.trim().to_string() },
+            snippet: if r.snippet.trim().is_empty() {
+                r.text.trim().to_string()
+            } else {
+                r.snippet.trim().to_string()
+            },
             source: "LangSearch".to_string(),
             published_at: r.date_published.filter(|date| !date.trim().is_empty()),
         })
@@ -285,14 +297,20 @@ pub fn parse_langsearch_response(
 
 #[async_trait]
 impl SearchProvider for LangSearchProvider {
-    fn id(&self) -> &'static str { "langsearch" }
+    fn id(&self) -> &'static str {
+        "langsearch"
+    }
 
     async fn search(&self, query: SearchQuery) -> Result<SearchResponse, FreeToolError> {
         if self.api_key.trim().is_empty() {
-            return Err(FreeToolError::NotConfigured("LangSearch no tiene API key configurada.".to_string()));
+            return Err(FreeToolError::NotConfigured(
+                "LangSearch no tiene API key configurada.".to_string(),
+            ));
         }
         let start = Instant::now();
-        let response = self.client.post(&self.base_url)
+        let response = self
+            .client
+            .post(&self.base_url)
             .timeout(self.timeout)
             .bearer_auth(self.api_key.trim())
             .json(&serde_json::json!({
@@ -300,11 +318,25 @@ impl SearchProvider for LangSearchProvider {
                 "count": query.max_results,
                 "freshness": "noLimit",
             }))
-            .send().await.map_err(map_reqwest_error)?;
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
         match response.status().as_u16() {
-            401 | 403 => return Err(FreeToolError::NotConfigured("LangSearch rechazó la API key.".to_string())),
-            429 => return Err(FreeToolError::RateLimited("LangSearch alcanzó su límite de solicitudes o tokens.".to_string())),
-            status if !(200..300).contains(&status) => return Err(FreeToolError::ProviderUnavailable(format!("LangSearch devolvió HTTP {status}."))),
+            401 | 403 => {
+                return Err(FreeToolError::NotConfigured(
+                    "LangSearch rechazó la API key.".to_string(),
+                ))
+            }
+            429 => {
+                return Err(FreeToolError::RateLimited(
+                    "LangSearch alcanzó su límite de solicitudes o tokens.".to_string(),
+                ))
+            }
+            status if !(200..300).contains(&status) => {
+                return Err(FreeToolError::ProviderUnavailable(format!(
+                    "LangSearch devolvió HTTP {status}."
+                )))
+            }
             _ => {}
         }
         let body = response.text().await.map_err(map_reqwest_error)?;
@@ -576,10 +608,18 @@ mod tests {
         let result = parse_langsearch_response(payload, 5, 12).unwrap();
         assert_eq!(result.provider, "langsearch");
         assert_eq!(result.results.len(), 2);
-        assert_eq!(result.results[0].published_at.as_deref(), Some("2026-11-01"));
+        assert_eq!(
+            result.results[0].published_at.as_deref(),
+            Some("2026-11-01")
+        );
         assert_eq!(result.results[1].title, "https://example.org/2");
         assert_eq!(result.results[1].snippet, "Fallback content");
-        assert!(parse_langsearch_response(r#"{"data":{"webPages":{"value":[]}}}"#, 5, 0).unwrap().results.is_empty());
+        assert!(
+            parse_langsearch_response(r#"{"data":{"webPages":{"value":[]}}}"#, 5, 0)
+                .unwrap()
+                .results
+                .is_empty()
+        );
         assert!(parse_langsearch_response("{}", 5, 0).is_err());
         assert!(parse_langsearch_response("invalid", 5, 0).is_err());
     }

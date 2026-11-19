@@ -183,7 +183,10 @@ pub struct Database {
 
 impl Database {
     /// Only conversational text is sent to Dreaming (no tool payloads or hidden system prompts).
-    pub fn dreaming_pending_messages(&self, limit: usize) -> anyhow::Result<Vec<(i64, String, String, String)>> {
+    pub fn dreaming_pending_messages(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(i64, String, String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT m.rowid, m.role, m.content, m.id FROM messages m
              JOIN conversations c ON c.id = m.conversation_id
@@ -191,47 +194,80 @@ impl Database {
                AND m.deleted_at IS NULL AND c.deleted_at IS NULL
                AND m.kind = 'text' AND m.role IN ('user','assistant')
                AND m.content IS NOT NULL AND LENGTH(TRIM(m.content)) > 0
-             ORDER BY m.rowid ASC LIMIT ?1")?;
-        let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+             ORDER BY m.rowid ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn dreaming_store_batch(&mut self, last_rowid: i64, source_id: &str, facts: &[String]) -> anyhow::Result<()> {
+    pub fn dreaming_store_batch(
+        &mut self,
+        last_rowid: i64,
+        source_id: &str,
+        facts: &[String],
+    ) -> anyhow::Result<()> {
         let tx = self.conn.transaction()?;
         for content in facts {
             tx.execute("INSERT OR IGNORE INTO dreaming_memories (id, content, source_message_id, created_at)
                         VALUES (?1, ?2, ?3, ?4)", params![Uuid::new_v4().to_string(), content, source_id, Utc::now().to_rfc3339()])?;
         }
-        tx.execute("UPDATE dreaming_state SET last_message_rowid = ?1 WHERE id = 1", [last_rowid])?;
+        tx.execute(
+            "UPDATE dreaming_state SET last_message_rowid = ?1 WHERE id = 1",
+            [last_rowid],
+        )?;
         tx.commit()?;
         Ok(())
     }
 
     pub fn dreaming_list_memories(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT id, content FROM dreaming_memories ORDER BY created_at DESC LIMIT 200")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content FROM dreaming_memories ORDER BY created_at DESC LIMIT 200",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn dreaming_delete_memory(&self, id: &str) -> anyhow::Result<()> {
-        self.conn.execute("DELETE FROM dreaming_memories WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM dreaming_memories WHERE id = ?1", [id])?;
         Ok(())
     }
 
     /// Small, deterministic keyword retrieval; semantic embeddings can be added later.
-    pub fn dreaming_relevant_memories(&self, query: &str, limit: usize) -> anyhow::Result<Vec<String>> {
-        let terms: Vec<String> = query.split(|c: char| !c.is_alphanumeric())
-            .filter(|s| s.chars().count() >= 4).map(|s| s.to_lowercase())
-            .take(12).collect();
-        if terms.is_empty() { return Ok(Vec::new()); }
+    pub fn dreaming_relevant_memories(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let terms: Vec<String> = query
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| s.chars().count() >= 4)
+            .map(|s| s.to_lowercase())
+            .take(12)
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
         let memories = self.dreaming_list_memories()?;
-        let mut scored: Vec<(usize, String)> = memories.into_iter().filter_map(|(_, content)| {
-            let lower = content.to_lowercase();
-            let score = terms.iter().filter(|term| lower.contains(term.as_str())).count();
-            (score > 0).then_some((score, content))
-        }).collect();
-        scored.sort_by(|a,b| b.0.cmp(&a.0));
-        Ok(scored.into_iter().take(limit).map(|(_, content)| content).collect())
+        let mut scored: Vec<(usize, String)> = memories
+            .into_iter()
+            .filter_map(|(_, content)| {
+                let lower = content.to_lowercase();
+                let score = terms
+                    .iter()
+                    .filter(|term| lower.contains(term.as_str()))
+                    .count();
+                (score > 0).then_some((score, content))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, content)| content)
+            .collect())
     }
 
     pub fn default_db_path() -> PathBuf {

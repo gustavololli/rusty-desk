@@ -93,27 +93,33 @@ fn play_wav_file(path: &Path) {
         use windows::Win32::Media::Audio::{PlaySoundW, SND_FILENAME, SND_NODEFAULT, SND_SYNC};
         let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
         wide.push(0);
-        let _ = unsafe { PlaySoundW(PCWSTR(wide.as_ptr()), None, SND_FILENAME | SND_NODEFAULT | SND_SYNC) };
+        let _ = unsafe {
+            PlaySoundW(
+                PCWSTR(wide.as_ptr()),
+                None,
+                SND_FILENAME | SND_NODEFAULT | SND_SYNC,
+            )
+        };
         return;
     }
     #[cfg(not(windows))]
     {
-    let players: &[(&str, &[&str])] = &[
-        ("pw-play", &[]),
-        ("paplay", &[]),
-        ("aplay", &["-q"]),
-        ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet"]),
-    ];
+        let players: &[(&str, &[&str])] = &[
+            ("pw-play", &[]),
+            ("paplay", &[]),
+            ("aplay", &["-q"]),
+            ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet"]),
+        ];
 
-    for (bin, extra_args) in players {
-        if let Ok(mut child) = Command::new(bin).args(*extra_args).arg(path).spawn() {
-            if let Ok(status) = child.wait() {
-                if status.success() {
-                    return;
+        for (bin, extra_args) in players {
+            if let Ok(mut child) = Command::new(bin).args(*extra_args).arg(path).spawn() {
+                if let Ok(status) = child.wait() {
+                    if status.success() {
+                        return;
+                    }
                 }
             }
         }
-    }
     }
 }
 
@@ -137,7 +143,12 @@ fn write_synth_wav(path: &Path, event: SfxEvent) -> anyhow::Result<()> {
 const SAMPLE_RATE: u32 = 44_100;
 
 #[derive(Clone, Copy)]
-enum Timbre { Warm, Bell, Pluck, Bass }
+enum Timbre {
+    Warm,
+    Bell,
+    Pluck,
+    Bass,
+}
 
 #[derive(Clone, Copy)]
 struct Voice {
@@ -151,7 +162,14 @@ struct Voice {
 
 fn score(event: SfxEvent) -> Vec<Voice> {
     use Timbre::*;
-    let note = |at, hz, secs, gain, pan, timbre| Voice { at, hz, secs, gain, pan, timbre };
+    let note = |at, hz, secs, gain, pan, timbre| Voice {
+        at,
+        hz,
+        secs,
+        gain,
+        pan,
+        timbre,
+    };
     match event {
         SfxEvent::Startup => vec![
             note(0.00, 392.00, 0.26, 0.22, -0.3, Warm),
@@ -194,10 +212,18 @@ fn score(event: SfxEvent) -> Vec<Voice> {
             note(0.34, 880.00, 0.34, 0.20, 0.25, Bell),
             note(0.36, 659.25, 0.31, 0.10, -0.25, Warm),
         ],
-        SfxEvent::OrganizeDone => (0..4).map(|i| {
-            note(i as f32 * 0.052, [587.33, 698.46, 880.00, 1174.66][i], 0.12,
-                0.15, if i % 2 == 0 { -0.25 } else { 0.25 }, Pluck)
-        }).collect(),
+        SfxEvent::OrganizeDone => (0..4)
+            .map(|i| {
+                note(
+                    i as f32 * 0.052,
+                    [587.33, 698.46, 880.00, 1174.66][i],
+                    0.12,
+                    0.15,
+                    if i % 2 == 0 { -0.25 } else { 0.25 },
+                    Pluck,
+                )
+            })
+            .collect(),
         SfxEvent::Error => vec![
             note(0.00, 196.00, 0.17, 0.23, -0.15, Bass),
             note(0.15, 164.81, 0.22, 0.22, 0.15, Bass),
@@ -221,12 +247,20 @@ fn synthesize(event: SfxEvent) -> Vec<[f32; 2]> {
             let decay = (1.0 - progress * 0.40).max(0.0);
             let extra_decay = if matches!(voice.timbre, Timbre::Pluck | Timbre::Bell) {
                 (-2.4 * progress).exp()
-            } else { 1.0 };
+            } else {
+                1.0
+            };
             let phase = TAU * voice.hz * t + 0.013 * (TAU * 5.2 * t).sin();
             let raw = match voice.timbre {
-                Timbre::Warm => 0.72 * phase.sin() + 0.20 * (phase * 2.0).sin() + 0.08 * (phase * 3.0).sin(),
-                Timbre::Bell => 0.67 * (phase + 0.36 * (phase * 2.01).sin()).sin() + 0.33 * (phase * 2.4).sin(),
-                Timbre::Pluck => 0.62 * phase.sin() + 0.25 * (phase * 2.0).sin() + 0.13 * (phase * 3.0).sin(),
+                Timbre::Warm => {
+                    0.72 * phase.sin() + 0.20 * (phase * 2.0).sin() + 0.08 * (phase * 3.0).sin()
+                }
+                Timbre::Bell => {
+                    0.67 * (phase + 0.36 * (phase * 2.01).sin()).sin() + 0.33 * (phase * 2.4).sin()
+                }
+                Timbre::Pluck => {
+                    0.62 * phase.sin() + 0.25 * (phase * 2.0).sin() + 0.13 * (phase * 3.0).sin()
+                }
                 Timbre::Bass => 0.82 * phase.sin() + 0.18 * (phase * 2.0).sin(),
             };
             let sample = raw * voice.gain * attack * release * decay * extra_decay;
@@ -246,7 +280,10 @@ fn synthesize(event: SfxEvent) -> Vec<[f32; 2]> {
             stereo[i][1] += earlier[0] * feedback;
         }
     }
-    let peak = stereo.iter().flat_map(|lr| lr.iter()).fold(0.0_f32, |m, s| m.max(s.abs()));
+    let peak = stereo
+        .iter()
+        .flat_map(|lr| lr.iter())
+        .fold(0.0_f32, |m, s| m.max(s.abs()));
     let scale = if peak > 0.78 { 0.78 / peak } else { 1.0 };
     for frame in &mut stereo {
         frame[0] *= scale;
@@ -262,15 +299,25 @@ mod tests {
     #[test]
     fn effects_are_stereo_bounded_and_short() {
         let all = [
-            SfxEvent::Startup, SfxEvent::Click, SfxEvent::MessageSent,
-            SfxEvent::MessageReceived, SfxEvent::TaskAdded, SfxEvent::TaskCompleted,
-            SfxEvent::HabitLogged, SfxEvent::PomodoroStart, SfxEvent::PomodoroDone,
-            SfxEvent::OrganizeDone, SfxEvent::Error,
+            SfxEvent::Startup,
+            SfxEvent::Click,
+            SfxEvent::MessageSent,
+            SfxEvent::MessageReceived,
+            SfxEvent::TaskAdded,
+            SfxEvent::TaskCompleted,
+            SfxEvent::HabitLogged,
+            SfxEvent::PomodoroStart,
+            SfxEvent::PomodoroDone,
+            SfxEvent::OrganizeDone,
+            SfxEvent::Error,
         ];
         for event in all {
             let frames = synthesize(event);
             assert!(frames.len() > 100 && frames.len() < SAMPLE_RATE as usize);
-            assert!(frames.iter().flatten().all(|v| v.is_finite() && v.abs() <= 0.781));
+            assert!(frames
+                .iter()
+                .flatten()
+                .all(|v| v.is_finite() && v.abs() <= 0.781));
             assert!(frames.iter().flatten().any(|v| v.abs() > 0.001));
         }
     }

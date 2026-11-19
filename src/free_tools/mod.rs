@@ -14,7 +14,9 @@ use crate::persistence::Database;
 
 use exchange::FrankfurterProvider;
 use fetch::{fetch_url_safe, format_untrusted_fetch_for_llm};
-use search::{BraveProvider, LangSearchProvider, SearchProvider, SearchQuery, SearchResponse, TavilyProvider};
+use search::{
+    BraveProvider, LangSearchProvider, SearchProvider, SearchQuery, SearchResponse, TavilyProvider,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FreeToolError {
@@ -357,7 +359,8 @@ impl FreeToolsEngine {
                 Arc::new(BraveProvider::new(self.client.clone(), &cfg.brave.api_key))
             }
             SearchProviderId::LangSearch => Arc::new(LangSearchProvider::new(
-                self.client.clone(), &cfg.langsearch.api_key,
+                self.client.clone(),
+                &cfg.langsearch.api_key,
             )),
             SearchProviderId::Searxng => Arc::new(search::SearxngProvider {
                 client: self.client.clone(),
@@ -369,9 +372,21 @@ impl FreeToolsEngine {
 
     fn provider_order(&self, cfg: &ExternalToolsConfig) -> Vec<SearchProviderId> {
         match cfg.preferred_search_provider {
-            SearchProviderId::Tavily => vec![SearchProviderId::Tavily, SearchProviderId::LangSearch, SearchProviderId::Brave],
-            SearchProviderId::Brave => vec![SearchProviderId::Brave, SearchProviderId::LangSearch, SearchProviderId::Tavily],
-            SearchProviderId::LangSearch => vec![SearchProviderId::LangSearch, SearchProviderId::Tavily, SearchProviderId::Brave],
+            SearchProviderId::Tavily => vec![
+                SearchProviderId::Tavily,
+                SearchProviderId::LangSearch,
+                SearchProviderId::Brave,
+            ],
+            SearchProviderId::Brave => vec![
+                SearchProviderId::Brave,
+                SearchProviderId::LangSearch,
+                SearchProviderId::Tavily,
+            ],
+            SearchProviderId::LangSearch => vec![
+                SearchProviderId::LangSearch,
+                SearchProviderId::Tavily,
+                SearchProviderId::Brave,
+            ],
             SearchProviderId::Searxng => vec![
                 SearchProviderId::Searxng,
                 SearchProviderId::Tavily,
