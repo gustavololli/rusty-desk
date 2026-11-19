@@ -891,4 +891,76 @@ Client #112
         );
         assert!(calls.iter().any(|&(p, v, m)| p == pid && v == 65 && !m));
     }
+
+    #[test]
+    fn player_launch_plans_prefer_ffplay_and_keep_the_uri_as_data() {
+        let plans = player_launch_plans("https://radio.example.com/live.mp3");
+        assert_eq!(
+            plans.iter().map(|plan| plan.program).collect::<Vec<_>>(),
+            vec!["ffplay", "gst-play-1.0", "mpg123"]
+        );
+        assert_eq!(
+            plans[0].args,
+            [
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+                "-volume",
+                "100",
+                "https://radio.example.com/live.mp3",
+            ]
+        );
+        assert_eq!(plans[1].args[1], "--volume");
+        assert_eq!(plans[1].args[2], "1.00");
+        assert_eq!(plans[2].args, ["-q", "https://radio.example.com/live.mp3"]);
+        for plan in &plans {
+            assert_eq!(
+                plan.args.last().map(String::as_str),
+                Some("https://radio.example.com/live.mp3")
+            );
+            assert!(plan.args.iter().all(|arg| !arg.contains(' ')));
+        }
+    }
+
+    #[test]
+    fn playlist_parser_skips_comments_and_titles_come_from_the_uri() {
+        let m3u = "\u{feff}# comment\n#EXTINF:not-a-number,  \nsongs\\nested\\track.mp3\n\nonly-a-file.ogg\n";
+        let tracks = parse_m3u_content(m3u, Some(Path::new("/music")));
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].duration_secs, None);
+        assert_eq!(tracks[0].title, "track");
+        assert_eq!(tracks[0].uri, "/music/songs/nested/track.mp3");
+        assert_eq!(tracks[1].title, "only-a-file");
+        assert_eq!(
+            infer_title_from_uri("https://cdn.example/a/b.mp3?x=1"),
+            "b.mp3?x=1"
+        );
+        assert!(parse_m3u_content("# nothing\n", None).is_empty());
+        assert!(normalize_audio_url("rtsp://cam.local/stream").is_ok());
+        assert!(normalize_audio_url("file:///tmp/a.mp3").is_ok());
+        assert!(normalize_audio_url("ftp://nope").is_err());
+    }
+
+    #[test]
+    fn play_query_uses_a_one_based_index_then_title_or_uri() {
+        assert_eq!(classify_play_query(None, 3), PlaySelector::Current);
+        assert_eq!(classify_play_query(Some("  "), 3), PlaySelector::Current);
+        assert_eq!(classify_play_query(Some("2"), 3), PlaySelector::Index(1));
+        assert_eq!(
+            classify_play_query(Some("0"), 3),
+            PlaySelector::Text("0".into())
+        );
+        assert_eq!(
+            classify_play_query(Some("4"), 3),
+            PlaySelector::Text("4".into())
+        );
+        let tracks = [
+            ("LoFi Radio", "https://example/lofi"),
+            ("Morning", "/tmp/morning.mp3"),
+        ];
+        assert_eq!(find_track_index(&tracks, "LOFI"), Some(0));
+        assert_eq!(find_track_index(&tracks, "morning.mp3"), Some(1));
+        assert_eq!(find_track_index(&tracks, "missing"), None);
+    }
 }
