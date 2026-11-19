@@ -131,14 +131,18 @@ pub fn paint_oxidized_bezel(painter: &egui::Painter, rect: Rect, size: BezelSize
         (rail - 1.0, GOLD_DARK),
     ] {
         if inset >= 0.0 && inset < rail && rect.width() > inset * 2.0 {
-            painter.rect_stroke(rect.shrink(inset), 0.0, Stroke::new(1.0, color));
+            painter.rect_stroke(rect.shrink(inset), 0.0, Stroke::new(1.0_f32, color));
         }
     }
     if matches!(size, BezelSize::Window | BezelSize::Island) {
         // Metal rail fill between inner and outer strokes, with directional lighting.
         for i in 4..(rail as i32 - 2) {
             let color = if i % 3 == 0 { steel_light } else { steel };
-            painter.rect_stroke(rect.shrink(i as f32 + 0.5), 0.0, Stroke::new(1.0, color));
+            painter.rect_stroke(
+                rect.shrink(i as f32 + 0.5),
+                0.0,
+                Stroke::new(1.0_f32, color),
+            );
         }
     }
 
@@ -181,7 +185,7 @@ pub fn paint_oxidized_bezel(painter: &egui::Painter, rect: Rect, size: BezelSize
             );
             painter.line_segment(
                 [center + Vec2::new(-1.0, 1.0), center + Vec2::new(1.0, -1.0)],
-                Stroke::new(1.0, steel_shadow),
+                Stroke::new(1.0_f32, steel_shadow),
             );
         }
     }

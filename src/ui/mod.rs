@@ -1310,6 +1310,13 @@ impl RustyDeskApp {
     /// operations only trigger a recovery if that same area failed previously.
     fn report_system_outcome(&mut self, area: SystemArea, success: bool) {
         if let Some(event) = self.pet_system_health.observe(area, success) {
+            // Assistant failures keep the same glitch animation as any other
+            // subsystem error, and use the dedicated AI event.
+            let event = if area == SystemArea::Ai && event == PetEvent::ErrorOccurred {
+                PetEvent::AiError
+            } else {
+                event
+            };
             self.emit_pet_event(event);
         }
     }
@@ -2408,7 +2415,7 @@ impl RustyDeskApp {
                 };
                 ui.painter().rect_filled(bar, 0.0, bar_color);
                 ui.painter()
-                    .rect_stroke(bar, 0.0, Stroke::new(1.0, retro::BORDER));
+                    .rect_stroke(bar, 0.0, Stroke::new(1.0_f32, retro::BORDER));
                 paint_pixel_icon(
                     ui.painter(),
                     egui::Rect::from_center_size(bar.center(), Vec2::splat(14.0)),
