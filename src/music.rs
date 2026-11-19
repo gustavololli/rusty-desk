@@ -113,6 +113,72 @@ pub fn infer_title_from_uri(uri: &str) -> String {
         .to_string()
 }
 
+/// How `/play` chooses a track. A number is 1-based and only applies when it
+/// fits the list that is already loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaySelector {
+    Current,
+    Index(usize),
+    Text(String),
+}
+
+pub fn classify_play_query(query: Option<&str>, current_len: usize) -> PlaySelector {
+    let Some(raw) = query.map(str::trim).filter(|q| !q.is_empty()) else {
+        return PlaySelector::Current;
+    };
+    if let Ok(num) = raw.parse::<usize>() {
+        if num >= 1 && num <= current_len {
+            return PlaySelector::Index(num - 1);
+        }
+    }
+    PlaySelector::Text(raw.to_string())
+}
+
+/// Case-insensitive match against a track title or URI. `tracks` is `(title, uri)`.
+pub fn find_track_index(tracks: &[(&str, &str)], needle: &str) -> Option<usize> {
+    let needle = needle.to_lowercase();
+    tracks.iter().position(|(title, uri)| {
+        title.to_lowercase().contains(&needle) || uri.to_lowercase().contains(&needle)
+    })
+}
+
+/// Local players tried in order. ffplay is first because its volume is 0..=100.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerLaunch {
+    pub program: &'static str,
+    pub args: Vec<String>,
+}
+
+pub fn player_launch_plans(uri: &str) -> Vec<PlayerLaunch> {
+    vec![
+        PlayerLaunch {
+            program: "ffplay",
+            args: vec![
+                "-nodisp".into(),
+                "-autoexit".into(),
+                "-loglevel".into(),
+                "quiet".into(),
+                "-volume".into(),
+                "100".into(),
+                uri.into(),
+            ],
+        },
+        PlayerLaunch {
+            program: "gst-play-1.0",
+            args: vec![
+                "--quiet".into(),
+                "--volume".into(),
+                "1.00".into(),
+                uri.into(),
+            ],
+        },
+        PlayerLaunch {
+            program: "mpg123",
+            args: vec!["-q".into(), uri.into()],
+        },
+    ]
+}
+
 /// Reads and parses a `.m3u` or `.m3u8` file from disk, returning `(playlist_name, tracks)`.
 pub fn parse_m3u_file(path: &Path) -> Result<(String, Vec<M3uTrack>), String> {
     let bytes = fs::read(path).map_err(|e| format!("No se pudo leer '{}': {e}", path.display()))?;
@@ -509,51 +575,19 @@ impl MusicPlayer {
         self.paused = false;
 
         // Spawn at 100% internal gain so `pactl` can scale smoothly across 0..=100% and mute/unmute.
-        if let Ok(child) = Command::new("ffplay")
-            .args([
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "quiet",
-                "-volume",
-                "100",
-                uri,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            let pid = child.id();
-            self.child = Some(child);
-            self.push_worker_target(pid, 40);
-            return Ok(());
-        }
-
-        if let Ok(child) = Command::new("gst-play-1.0")
-            .args(["--quiet", "--volume", "1.00", uri])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            let pid = child.id();
-            self.child = Some(child);
-            self.push_worker_target(pid, 40);
-            return Ok(());
-        }
-
-        if let Ok(child) = Command::new("mpg123")
-            .args(["-q", uri])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            let pid = child.id();
-            self.child = Some(child);
-            self.push_worker_target(pid, 40);
-            return Ok(());
+        for plan in player_launch_plans(uri) {
+            if let Ok(child) = Command::new(plan.program)
+                .args(&plan.args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                let pid = child.id();
+                self.child = Some(child);
+                self.push_worker_target(pid, 40);
+                return Ok(());
+            }
         }
 
         #[cfg(windows)]

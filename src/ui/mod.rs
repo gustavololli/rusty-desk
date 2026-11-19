@@ -18,7 +18,7 @@ use crate::free_tools::{
     format_search_response_for_user_and_llm, FreeToolsEngine, ProviderHealthStatus,
     TurnExternalLimits,
 };
-use crate::music::{self, MusicPlayer};
+use crate::music::{self, classify_play_query, find_track_index, MusicPlayer, PlaySelector};
 use crate::organizer::FileOrganizer;
 use crate::persistence::{ConversationSummary, MessageKind, NewMusicTrack, PersistedTrack};
 use crate::platform::{
@@ -3570,63 +3570,65 @@ impl RustyDeskApp {
     }
 
     fn play_saved_music_by_query(&mut self, query: Option<&str>) -> String {
-        let Some(raw_q) = query.map(str::trim).filter(|q| !q.is_empty()) else {
-            if self.music_tracks.is_empty() {
-                let Some(first_id) = self.data.playlists.first().map(|p| p.id.clone()) else {
-                    return "⚠️ No hay pistas guardadas. Usá `/musica <url> [nombre]` para guardar una.".to_string();
-                };
-                self.select_music_playlist(&first_id);
-            }
-            if self.music_tracks.is_empty() {
-                return "⚠️ No hay pistas para reproducir.".to_string();
-            }
-            let idx = self.music_current_track_idx.unwrap_or(0);
-            self.play_music_track_at(idx);
-            return self
-                .music_status
-                .clone()
-                .unwrap_or_else(|| "▶ Reproduciendo".to_string());
-        };
-
-        if let Ok(num) = raw_q.parse::<usize>() {
-            if num >= 1 && num <= self.music_tracks.len() {
-                self.play_music_track_at(num - 1);
-                return self
-                    .music_status
+        match classify_play_query(query, self.music_tracks.len()) {
+            PlaySelector::Current => {
+                if self.music_tracks.is_empty() {
+                    let Some(first_id) = self.data.playlists.first().map(|p| p.id.clone()) else {
+                        return "⚠️ No hay pistas guardadas. Usá `/musica <url> [nombre]` para guardar una.".to_string();
+                    };
+                    self.select_music_playlist(&first_id);
+                }
+                if self.music_tracks.is_empty() {
+                    return "⚠️ No hay pistas para reproducir.".to_string();
+                }
+                let idx = self.music_current_track_idx.unwrap_or(0);
+                self.play_music_track_at(idx);
+                self.music_status
                     .clone()
-                    .unwrap_or_else(|| "▶ Reproduciendo".to_string());
+                    .unwrap_or_else(|| "▶ Reproduciendo".to_string())
             }
-        }
-
-        let needle = raw_q.to_lowercase();
-        if let Some(idx) = self.music_tracks.iter().position(|t| {
-            t.title.to_lowercase().contains(&needle) || t.uri.to_lowercase().contains(&needle)
-        }) {
-            self.play_music_track_at(idx);
-            return self
-                .music_status
-                .clone()
-                .unwrap_or_else(|| "▶ Reproduciendo".to_string());
-        }
-
-        let playlist_ids: Vec<String> = self.data.playlists.iter().map(|p| p.id.clone()).collect();
-        for pid in playlist_ids {
-            if let Ok(tracks) = self.data.load_playlist_tracks(&pid) {
-                if let Some(idx) = tracks.iter().position(|t| {
-                    t.title.to_lowercase().contains(&needle)
-                        || t.uri.to_lowercase().contains(&needle)
-                }) {
-                    self.select_music_playlist(&pid);
+            PlaySelector::Index(idx) => {
+                self.play_music_track_at(idx);
+                self.music_status
+                    .clone()
+                    .unwrap_or_else(|| "▶ Reproduciendo".to_string())
+            }
+            PlaySelector::Text(raw_q) => {
+                let current: Vec<(&str, &str)> = self
+                    .music_tracks
+                    .iter()
+                    .map(|t| (t.title.as_str(), t.uri.as_str()))
+                    .collect();
+                if let Some(idx) = find_track_index(&current, &raw_q) {
                     self.play_music_track_at(idx);
                     return self
                         .music_status
                         .clone()
                         .unwrap_or_else(|| "▶ Reproduciendo".to_string());
                 }
+
+                let playlist_ids: Vec<String> =
+                    self.data.playlists.iter().map(|p| p.id.clone()).collect();
+                for pid in playlist_ids {
+                    if let Ok(tracks) = self.data.load_playlist_tracks(&pid) {
+                        let pairs: Vec<(&str, &str)> = tracks
+                            .iter()
+                            .map(|t| (t.title.as_str(), t.uri.as_str()))
+                            .collect();
+                        if let Some(idx) = find_track_index(&pairs, &raw_q) {
+                            self.select_music_playlist(&pid);
+                            self.play_music_track_at(idx);
+                            return self
+                                .music_status
+                                .clone()
+                                .unwrap_or_else(|| "▶ Reproduciendo".to_string());
+                        }
+                    }
+                }
+
+                format!("⚠️ No encontré ninguna pista guardada que coincida con '{raw_q}'.")
             }
         }
-
-        format!("⚠️ No encontré ninguna pista guardada que coincida con '{raw_q}'.")
     }
 
     fn sync_audio_volume(&mut self, vol: u8, save_now: bool) {
