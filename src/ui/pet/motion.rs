@@ -291,4 +291,42 @@ mod tests {
         assert_eq!(ctrl.pose().tilt, 0.0);
         assert_eq!(ctrl.pose().y, 0.0);
     }
+
+    #[test]
+    fn notice_looks_aside_and_a_bad_timestep_does_not_move() {
+        let mut ctrl = MotionController::default();
+        let config = PetConfig::default();
+        ctrl.notice(true);
+        for _ in 0..30 {
+            ctrl.tick(1.0 / 60.0, AnimationState::Idle, &config);
+        }
+        assert!(ctrl.pose().gaze_x > 0.2, "gaze {}", ctrl.pose().gaze_x);
+
+        let mut frozen = MotionController::default();
+        frozen.tick(f32::NAN, AnimationState::Thinking, &config);
+        frozen.tick(f32::INFINITY, AnimationState::Thinking, &config);
+        assert_eq!(frozen.pose().tilt, 0.0);
+    }
+
+    #[test]
+    fn expressive_thinking_leans_further_than_subtle() {
+        let lean = |intensity| {
+            let mut ctrl = MotionController::default();
+            let config = PetConfig {
+                intensity,
+                ..PetConfig::default()
+            };
+            for _ in 0..180 {
+                ctrl.tick(1.0 / 60.0, AnimationState::Thinking, &config);
+            }
+            ctrl.pose().tilt
+        };
+        let subtle = lean(crate::config::PetIntensity::Subtle);
+        let expressive = lean(crate::config::PetIntensity::Expressive);
+        assert!(
+            expressive < subtle,
+            "subtle {subtle}, expressive {expressive}"
+        );
+        assert!(subtle < -1.0);
+    }
 }

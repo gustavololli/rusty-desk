@@ -398,4 +398,109 @@ mod tests {
             assert_eq!(frame.bob_px, 0);
         }
     }
+
+    #[test]
+    fn lifecycle_events_respect_mood_and_preferences() {
+        let cfg = PetConfig::default();
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::IdleTimeout, &cfg, AssistantMood::Idle);
+        ctrl.on_event(PetEvent::UserDragged, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::WakeUp);
+
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::IdleTimeout, &cfg, AssistantMood::Idle);
+        ctrl.on_event(
+            PetEvent::ModeChanged(WindowMode::Island),
+            &cfg,
+            AssistantMood::Idle,
+        );
+        assert_eq!(ctrl.state(), AnimationState::WakeUp);
+        let mut awake = AnimationController::default();
+        awake.on_event(
+            PetEvent::ModeChanged(WindowMode::Pet),
+            &cfg,
+            AssistantMood::Idle,
+        );
+        assert_eq!(awake.state(), AnimationState::Idle);
+
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::OperationSucceeded, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Happy);
+        ctrl.on_event(PetEvent::AiThinking, &cfg, AssistantMood::Thinking);
+        ctrl.on_event(PetEvent::OperationSucceeded, &cfg, AssistantMood::Thinking);
+        assert_eq!(ctrl.state(), AnimationState::Thinking);
+
+        let quiet = PetConfig {
+            celebrate_tasks: false,
+            ..PetConfig::default()
+        };
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::HabitCompleted, &quiet, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Happy);
+
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::PomodoroStarted, &cfg, AssistantMood::Focused);
+        ctrl.on_event(PetEvent::PomodoroPaused, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Idle);
+        ctrl.on_event(
+            PetEvent::VoiceListeningStart,
+            &cfg,
+            AssistantMood::Listening,
+        );
+        ctrl.on_event(PetEvent::VoiceListeningStop, &cfg, AssistantMood::Focused);
+        assert_eq!(ctrl.state(), AnimationState::Focused);
+
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::IdleTimeout, &cfg, AssistantMood::Idle);
+        ctrl.set_music_playing(true);
+        assert_eq!(ctrl.state(), AnimationState::ListeningMusic);
+
+        let reduced = PetConfig {
+            reduce_animations: true,
+            ..PetConfig::default()
+        };
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::AiError, &reduced, AssistantMood::Idle);
+        assert_eq!(
+            ctrl.tick(0.05, AssistantMood::Idle, &reduced).eye,
+            EyeExpression::ErrorCross
+        );
+        assert_eq!(ctrl.recommended_repaint_ms(true, &reduced), 16);
+        let calm = AnimationController::default();
+        assert_eq!(calm.recommended_repaint_ms(false, &cfg), 16);
+        assert_eq!(calm.recommended_repaint_ms(false, &reduced), 400);
+
+        let mut busy = AnimationController::default();
+        busy.on_event(PetEvent::AiThinking, &cfg, AssistantMood::Thinking);
+        busy.on_event(PetEvent::CuriosityTrigger, &cfg, AssistantMood::Thinking);
+        assert_eq!(busy.state(), AnimationState::Thinking);
+        let mut idle = AnimationController::default();
+        idle.on_event(PetEvent::LongWorkSession, &cfg, AssistantMood::Idle);
+        assert_eq!(idle.state(), AnimationState::Idle);
+        idle.on_event(PetEvent::MarkdownConverted, &cfg, AssistantMood::Idle);
+        assert_eq!(idle.state(), AnimationState::Happy);
+    }
+
+    #[test]
+    fn event_priority_orders_critical_above_low() {
+        assert!(PetEvent::AiError.priority() > PetEvent::UserClicked.priority());
+        assert!(PetEvent::UserClicked.priority() > PetEvent::UserHovered.priority());
+        assert!(PetEvent::UserHovered.priority() > PetEvent::CuriosityTrigger.priority());
+        assert_eq!(
+            PetEvent::PomodoroFinished.priority(),
+            super::events::EventPriority::Critical
+        );
+        assert_eq!(
+            PetEvent::SystemRecovered.priority(),
+            super::events::EventPriority::High
+        );
+        assert_eq!(
+            PetEvent::SectionEmpty(EmptySection::Chat).priority(),
+            super::events::EventPriority::Low
+        );
+        assert_eq!(
+            PetEvent::OperationSucceeded.priority(),
+            super::events::EventPriority::Low
+        );
+    }
 }
