@@ -334,4 +334,31 @@ mod tests {
         drop(reader);
         let _ = fs::remove_file(path);
     }
+
+    #[test]
+    fn every_event_has_a_unique_filename_and_a_distinct_length() {
+        let events = [
+            SfxEvent::Startup,
+            SfxEvent::Click,
+            SfxEvent::MessageSent,
+            SfxEvent::MessageReceived,
+            SfxEvent::TaskAdded,
+            SfxEvent::TaskCompleted,
+            SfxEvent::HabitLogged,
+            SfxEvent::PomodoroStart,
+            SfxEvent::PomodoroDone,
+            SfxEvent::OrganizeDone,
+            SfxEvent::Error,
+        ];
+        let mut names = events.map(SfxEvent::file_name).to_vec();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), events.len());
+        assert!(synthesize(SfxEvent::Click).len() < synthesize(SfxEvent::Startup).len());
+        assert!(synthesize(SfxEvent::Error)
+            .iter()
+            .flatten()
+            .any(|sample| sample.abs() > 0.01));
+        play(SfxEvent::Click, false);
+    }
 }

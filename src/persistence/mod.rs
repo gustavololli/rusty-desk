@@ -1204,4 +1204,71 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn migrations_are_idempotent_and_dreaming_retrieval_ignores_tool_text() {
+        let mut db = Database::open_in_memory().unwrap();
+        let version: i64 = db
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 5);
+        migrations::run_migrations(&mut db.conn).unwrap();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 5);
+
+        db.ensure_conversation("c1", "Chat").unwrap();
+        let text = NewPersistedMessage {
+            id: "m-text".into(),
+            conversation_id: "c1".into(),
+            role: "user".into(),
+            kind: MessageKind::Text,
+            content: Some("Gustavo prefiere el teclado mecanico".into()),
+            tool_calls_json: None,
+            tool_call_id: None,
+            raw_gemini_parts_json: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        db.append_message(&text).unwrap();
+        db.append_message(&NewPersistedMessage {
+            id: "m-tool".into(),
+            conversation_id: "c1".into(),
+            role: "assistant".into(),
+            kind: MessageKind::ToolCall,
+            content: Some("token secreto de herramienta".into()),
+            tool_calls_json: Some("[]".into()),
+            tool_call_id: None,
+            raw_gemini_parts_json: None,
+            created_at: "2026-01-01T00:00:01Z".into(),
+        })
+        .unwrap();
+        let pending = db.dreaming_pending_messages(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, "user");
+        db.dreaming_store_batch(
+            pending[0].0,
+            "m-text",
+            &[
+                "Gustavo prefiere el teclado mecanico".into(),
+                "El proyecto activo se llama Rusty Desk".into(),
+            ],
+        )
+        .unwrap();
+        assert!(db.dreaming_pending_messages(10).unwrap().is_empty());
+        let found = db.dreaming_relevant_memories("teclado rojo", 2).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("teclado"));
+        assert!(db.dreaming_relevant_memories("el", 5).unwrap().is_empty());
+        let memories = db.dreaming_list_memories().unwrap();
+        assert_eq!(memories.len(), 2);
+        db.dreaming_delete_memory(&memories[0].0).unwrap();
+        assert_eq!(db.dreaming_list_memories().unwrap().len(), 1);
+    }
 }

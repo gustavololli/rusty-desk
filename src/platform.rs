@@ -367,4 +367,44 @@ mod tests {
             "rule1,rusty-desk-always-on-top"
         );
     }
+
+    #[test]
+    fn session_kind_prefers_xdg_then_display_variables() {
+        assert_eq!(
+            session_kind_from_env("Wayland", None, Some(":0")),
+            SessionKind::Wayland
+        );
+        assert_eq!(
+            session_kind_from_env("x11", Some("wayland-0"), None),
+            SessionKind::X11
+        );
+        assert_eq!(
+            session_kind_from_env("", Some(""), Some(":0")),
+            SessionKind::X11
+        );
+        assert_eq!(
+            session_kind_from_env("", Some("wayland-0"), None),
+            SessionKind::Wayland
+        );
+        assert_eq!(
+            session_kind_from_env("", None, Some("")),
+            SessionKind::Unknown
+        );
+    }
+
+    #[test]
+    fn monitor_rect_falls_back_when_scale_or_size_is_unusable() {
+        let from_egui = resolve_monitor_rect(Some([800.0, 600.0]), None, None, f32::NAN);
+        assert_eq!((from_egui.width, from_egui.height), (800.0, 600.0));
+        assert_eq!(
+            resolve_monitor_rect(Some([10.0, 10.0]), None, None, 1.0),
+            MonitorRect::default()
+        );
+        let from_x11 = resolve_monitor_rect(None, None, Some((0.0, 0.0, 1920.0, 1080.0)), 2.0);
+        assert_eq!(
+            (from_x11.x, from_x11.y, from_x11.width, from_x11.height),
+            (0.0, 0.0, 960.0, 540.0)
+        );
+        assert_eq!(from_x11.as_tuple(), (0.0, 0.0, 960.0, 540.0));
+    }
 }

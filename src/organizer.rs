@@ -208,4 +208,44 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn categorize_covers_every_bucket_and_collisions_skip_hidden_files() {
+        assert_eq!(FileOrganizer::categorize(Path::new("a.JPG")), "Imágenes");
+        assert_eq!(FileOrganizer::categorize(Path::new("a.mp4")), "Videos");
+        assert_eq!(FileOrganizer::categorize(Path::new("a.FLAC")), "Audio");
+        assert_eq!(
+            FileOrganizer::categorize(Path::new("a.tar.gz")),
+            "Comprimidos"
+        );
+        assert_eq!(FileOrganizer::categorize(Path::new("a.rs")), "Código");
+        assert_eq!(
+            FileOrganizer::categorize(Path::new("a.deb")),
+            "Instaladores"
+        );
+        assert_eq!(FileOrganizer::categorize(Path::new("a.xlsx")), "Documentos");
+        assert_eq!(FileOrganizer::categorize(Path::new("README")), "Otros");
+
+        let dir = std::env::temp_dir().join(format!(
+            "rusty_desk_org_cat_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("Imágenes")).unwrap();
+        fs::write(dir.join("Imágenes").join("foto.png"), b"old").unwrap();
+        fs::write(dir.join("foto.png"), b"new").unwrap();
+        fs::write(dir.join(".hidden"), b"secret").unwrap();
+        fs::create_dir(dir.join("nested")).unwrap();
+
+        let mut org = FileOrganizer::default();
+        let plans = org.preview(&dir).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].file_name, "foto.png");
+        assert_eq!(plans[0].to, dir.join("Imágenes").join("foto_1.png"));
+        assert!(org.preview(&dir.join("missing")).is_err());
+        assert!(org.undo_last().is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

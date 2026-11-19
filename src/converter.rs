@@ -284,4 +284,41 @@ mod tests {
         let extreme = compact_for_llm(sample, CompactionMode::Extreme);
         assert_eq!(extreme, "# Título - Item 1 - Item 2");
     }
+
+    #[test]
+    fn compaction_aliases_crlf_unicode_stats_and_missing_files() {
+        assert_eq!(
+            CompactionMode::from_str_opt(Some("NINGUNA")),
+            CompactionMode::None
+        );
+        assert_eq!(
+            CompactionMode::from_str_opt(Some("linea")),
+            CompactionMode::LineByLine
+        );
+        assert_eq!(
+            CompactionMode::from_str_opt(Some("MAX")),
+            CompactionMode::Extreme
+        );
+        assert_eq!(CompactionMode::from_str_opt(None), CompactionMode::Moderate);
+        assert_eq!(
+            CompactionMode::from_str_opt(Some("no-such")).label(),
+            "Moderada (Markdown)"
+        );
+        assert_eq!(compact_for_llm("hola", CompactionMode::None), "hola");
+        assert_eq!(
+            compact_for_llm("a  \r\nb\r\n\r\n\r\nc", CompactionMode::Moderate),
+            "a\nb\n\nc"
+        );
+
+        let (orig, compact, saved) = compaction_stats("áááá", "á");
+        assert_eq!((orig, compact), (4, 1));
+        assert!((saved - 75.0).abs() < 0.01);
+        assert_eq!(compaction_stats("", "").2, 0.0);
+
+        let missing = convert_file_to_markdown(Path::new("/tmp/rusty-desk-missing-file.md"));
+        assert!(missing.unwrap_err().contains("no existe"));
+        assert!(convert_file_to_markdown(Path::new("."))
+            .unwrap_err()
+            .contains("no es un archivo"));
+    }
 }

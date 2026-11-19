@@ -614,4 +614,47 @@ mod tests {
         assert_eq!(parsed.island_position, IslandPosition::Left);
         assert_eq!(parsed.island_custom_position, Some([12.0, 240.0]));
     }
+
+    #[test]
+    fn mock_provider_key_rules_and_legacy_island_alias() {
+        let mut cfg = AppConfig {
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: "  ".into(),
+            force_mock: false,
+            ..AppConfig::default()
+        };
+        assert!(cfg.should_use_mock());
+        cfg.api_key = "sk-test".into();
+        assert!(!cfg.should_use_mock());
+        cfg.api_key.clear();
+        cfg.base_url = "http://127.0.0.1:1234/v1".into();
+        assert!(!cfg.should_use_mock());
+        cfg.force_mock = true;
+        cfg.api_key = "sk-test".into();
+        assert!(cfg.should_use_mock());
+
+        assert_eq!(PetSize::Small.pixels(), 64.0);
+        assert_eq!(PetSize::Normal.pixels(), 80.0);
+        assert_eq!(PetSize::Large.pixels(), 104.0);
+        assert_eq!(PetSize::Large.label(), "Grande (104px)");
+        let alias: IslandPosition = serde_json::from_str("\"Current\"").unwrap();
+        assert_eq!(alias, IslandPosition::Custom);
+
+        let partial: AppConfig = serde_json::from_str(
+            r#"{"assistant_name":"R","base_url":"https://api.openai.com/v1","api_key":"","model":"gpt-4o-mini","stt_model":"whisper-1","force_mock":false,"tts_enabled":false,"organize_target_dir":"/tmp","future_flag":true}"#,
+        )
+        .unwrap();
+        assert_eq!(partial.assistant_name, "R");
+        assert_eq!(partial.external_tools.tavily.monthly_budget, 1000);
+        assert!(!partial.external_tools.langsearch.enabled);
+        assert_eq!(clamp_pet_position([10.0, 10.0], 80.0, None), [10.0, 10.0]);
+        assert_eq!(
+            clamp_window_position([f32::INFINITY, 1.0], [10.0, 10.0], None),
+            [60.0, 60.0]
+        );
+        assert_eq!(
+            compute_island_position(IslandPosition::Top, [100.0, 40.0], None, f32::NAN, None),
+            Some([910.0, 12.0])
+        );
+    }
 }

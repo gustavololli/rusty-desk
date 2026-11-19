@@ -148,4 +148,39 @@ mod tests {
         );
         assert!(parse_memories("no json").is_err());
     }
+
+    #[test]
+    fn local_http_is_allowed_and_bad_urls_are_rejected() {
+        let local = DreamingConfig {
+            model: "m".into(),
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            ..DreamingConfig::default()
+        };
+        assert!(validate_config(&local).is_ok());
+        let mut cfg = local.clone();
+        cfg.model = "  ".into();
+        assert!(validate_config(&cfg).is_err());
+        cfg.model = "m".into();
+        cfg.base_url = "ftp://127.0.0.1/v1".into();
+        assert!(validate_config(&cfg).is_err());
+        cfg.base_url = "http://localhost:1234/v1".into();
+        assert!(validate_config(&cfg).is_ok());
+        // reqwest reports this host as "[::1]", which the local-host check does not accept.
+        cfg.base_url = "http://[::1]:1234/v1".into();
+        assert!(validate_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn memory_parser_drops_short_long_and_extra_items() {
+        let ok = "x".repeat(12);
+        let mut memories = vec!["corto".to_string(), ok.clone(), "y".repeat(351)];
+        memories.extend((0..10).map(|i| format!("memoria numero {i} con texto suficiente")));
+        let raw = format!("```\n{}\n```", serde_json::json!({ "memories": memories }));
+        let parsed = parse_memories(&raw).unwrap();
+        assert_eq!(parsed.len(), 8);
+        assert_eq!(parsed[0], ok);
+        assert!(parsed
+            .iter()
+            .all(|item| (12..=350).contains(&item.chars().count())));
+    }
 }
