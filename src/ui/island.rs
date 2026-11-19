@@ -272,6 +272,9 @@ impl IslandStateMachine {
     }
 
     fn stay_visible_reason(input: &IslandInput, can_auto_hide: bool) -> bool {
+        // Playback is part of the input so the UI can pass the real setting.
+        // It does not keep the island open once auto-hide is enabled.
+        let _ = (input.keep_visible_during_playback, input.music_active);
         !input.auto_hide
             || !can_auto_hide
             || input.is_dragging
@@ -279,7 +282,6 @@ impl IslandStateMachine {
             || input.has_open_menu
             || input.is_recording
             || input.pointer_in_island
-            // Background music must not pin the island open when auto-hide is enabled.
             || (input.ai_busy && input.keep_visible_during_ai)
     }
 
