@@ -4,13 +4,21 @@ use std::sync::{Arc, Mutex};
 /// Compile-time host detection; native backends are selected by the target OS.
 pub fn host_os_label() -> &'static str {
     #[cfg(target_os = "windows")]
-    { return "Windows"; }
+    {
+        "Windows"
+    }
     #[cfg(target_os = "linux")]
-    { return "Linux"; }
+    {
+        "Linux"
+    }
     #[cfg(target_os = "macos")]
-    { return "macOS"; }
+    {
+        "macOS"
+    }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-    { "Otro sistema" }
+    {
+        "Otro sistema"
+    }
 }
 
 /// Display server session kind.
@@ -47,41 +55,57 @@ impl MonitorRect {
     }
 }
 
-/// Detects whether the current Linux desktop session is X11 or Wayland.
-pub fn detect_session_kind() -> SessionKind {
-    let xdg = std::env::var("XDG_SESSION_TYPE")
-        .unwrap_or_default()
-        .to_lowercase();
+/// Classifies a desktop session from the variables a display server exports.
+/// `XDG_SESSION_TYPE` wins. An empty value falls through to the display name.
+pub fn session_kind_from_env(
+    xdg_session_type: &str,
+    wayland_display: Option<&str>,
+    display: Option<&str>,
+) -> SessionKind {
+    let xdg = xdg_session_type.to_lowercase();
     if xdg == "wayland" {
         return SessionKind::Wayland;
     }
     if xdg == "x11" {
         return SessionKind::X11;
     }
-    if std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty()) {
+    if wayland_display.is_some_and(|v| !v.is_empty()) {
         return SessionKind::Wayland;
     }
-    if std::env::var("DISPLAY").is_ok_and(|v| !v.is_empty()) {
+    if display.is_some_and(|v| !v.is_empty()) {
         return SessionKind::X11;
     }
     SessionKind::Unknown
 }
 
+/// Detects whether the current Linux desktop session is X11 or Wayland.
+pub fn detect_session_kind() -> SessionKind {
+    let wayland = std::env::var("WAYLAND_DISPLAY").ok();
+    let display = std::env::var("DISPLAY").ok();
+    session_kind_from_env(
+        &std::env::var("XDG_SESSION_TYPE").unwrap_or_default(),
+        wayland.as_deref(),
+        display.as_deref(),
+    )
+}
+
 /// Queries the X11 root screen dimensions in physical pixels.
 pub fn query_x11_virtual_bounds() -> Option<(f32, f32, f32, f32)> {
     #[cfg(not(target_os = "linux"))]
-    { return None; }
+    {
+        return None;
+    }
     #[cfg(target_os = "linux")]
     {
-    use x11rb::connection::Connection;
-    let (conn, screen_num) = x11rb::connect(None).ok()?;
-    let screen = conn.setup().roots.get(screen_num)?;
-    Some((
-        0.0,
-        0.0,
-        f32::from(screen.width_in_pixels),
-        f32::from(screen.height_in_pixels),
-    ))
+        use x11rb::connection::Connection;
+        let (conn, screen_num) = x11rb::connect(None).ok()?;
+        let screen = conn.setup().roots.get(screen_num)?;
+        Some((
+            0.0,
+            0.0,
+            f32::from(screen.width_in_pixels),
+            f32::from(screen.height_in_pixels),
+        ))
     }
 }
 
@@ -222,61 +246,64 @@ pub fn spawn_global_cursor_tracker() -> Arc<Mutex<Option<(i16, i16)>>> {
 /// asynchronously so KWin keeps Rusty-Desk above other windows when requested.
 pub fn apply_platform_always_on_top(enabled: bool) {
     #[cfg(not(target_os = "linux"))]
-    { let _ = enabled; return; }
-    #[cfg(target_os = "linux")]
     {
-    let is_wayland = std::env::var("XDG_SESSION_TYPE")
-        .map(|v| v.eq_ignore_ascii_case("wayland"))
-        .unwrap_or(false)
-        || std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let is_kde = std::env::var("XDG_CURRENT_DESKTOP")
-        .map(|v| v.to_ascii_uppercase().contains("KDE"))
-        .unwrap_or(false);
-
-    if !is_wayland || !is_kde {
+        let _ = enabled;
         return;
     }
+    #[cfg(target_os = "linux")]
+    {
+        let is_wayland = std::env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false)
+            || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let is_kde = std::env::var("XDG_CURRENT_DESKTOP")
+            .map(|v| v.to_ascii_uppercase().contains("KDE"))
+            .unwrap_or(false);
 
-    std::thread::spawn(move || {
-        use std::process::Command;
-
-        const RULE_ID: &str = "rusty-desk-always-on-top";
-        let rules_path = directories::BaseDirs::new()
-            .map(|b| b.config_dir().join("kwinrulesrc"))
-            .unwrap_or_else(|| std::path::PathBuf::from("kwinrulesrc"));
-
-        let existing_rules = std::fs::read_to_string(&rules_path)
-            .ok()
-            .and_then(|raw| {
-                raw.lines()
-                    .find_map(|line| line.strip_prefix("rules=").map(str::to_string))
-            })
-            .unwrap_or_default();
-        let merged_rules = merge_kwin_rules_list(&existing_rules, RULE_ID);
-        let above_val = if enabled { "true" } else { "false" };
-
-        let writes = [
-            ("General", "rules", merged_rules.as_str()),
-            (RULE_ID, "Description", "Rusty-Desk Always On Top"),
-            (RULE_ID, "title", "Rusty-Desk"),
-            (RULE_ID, "titlematch", "1"),
-            (RULE_ID, "above", above_val),
-            (RULE_ID, "aboverule", "2"),
-        ];
-
-        for (group, key, val) in writes {
-            let status = Command::new("kwriteconfig6")
-                .args(["--file", "kwinrulesrc", "--group", group, "--key", key, val])
-                .status();
-            if status.is_err() {
-                return;
-            }
+        if !is_wayland || !is_kde {
+            return;
         }
 
-        let _ = Command::new("qdbus6")
-            .args(["org.kde.KWin", "/KWin", "reconfigure"])
-            .status();
-    });
+        std::thread::spawn(move || {
+            use std::process::Command;
+
+            const RULE_ID: &str = "rusty-desk-always-on-top";
+            let rules_path = directories::BaseDirs::new()
+                .map(|b| b.config_dir().join("kwinrulesrc"))
+                .unwrap_or_else(|| std::path::PathBuf::from("kwinrulesrc"));
+
+            let existing_rules = std::fs::read_to_string(&rules_path)
+                .ok()
+                .and_then(|raw| {
+                    raw.lines()
+                        .find_map(|line| line.strip_prefix("rules=").map(str::to_string))
+                })
+                .unwrap_or_default();
+            let merged_rules = merge_kwin_rules_list(&existing_rules, RULE_ID);
+            let above_val = if enabled { "true" } else { "false" };
+
+            let writes = [
+                ("General", "rules", merged_rules.as_str()),
+                (RULE_ID, "Description", "Rusty-Desk Always On Top"),
+                (RULE_ID, "title", "Rusty-Desk"),
+                (RULE_ID, "titlematch", "1"),
+                (RULE_ID, "above", above_val),
+                (RULE_ID, "aboverule", "2"),
+            ];
+
+            for (group, key, val) in writes {
+                let status = Command::new("kwriteconfig6")
+                    .args(["--file", "kwinrulesrc", "--group", group, "--key", key, val])
+                    .status();
+                if status.is_err() {
+                    return;
+                }
+            }
+
+            let _ = Command::new("qdbus6")
+                .args(["org.kde.KWin", "/KWin", "reconfigure"])
+                .status();
+        });
     }
 }
 
@@ -339,5 +366,45 @@ mod tests {
             merge_kwin_rules_list("rule1,rusty-desk-always-on-top", "rusty-desk-always-on-top"),
             "rule1,rusty-desk-always-on-top"
         );
+    }
+
+    #[test]
+    fn session_kind_prefers_xdg_then_display_variables() {
+        assert_eq!(
+            session_kind_from_env("Wayland", None, Some(":0")),
+            SessionKind::Wayland
+        );
+        assert_eq!(
+            session_kind_from_env("x11", Some("wayland-0"), None),
+            SessionKind::X11
+        );
+        assert_eq!(
+            session_kind_from_env("", Some(""), Some(":0")),
+            SessionKind::X11
+        );
+        assert_eq!(
+            session_kind_from_env("", Some("wayland-0"), None),
+            SessionKind::Wayland
+        );
+        assert_eq!(
+            session_kind_from_env("", None, Some("")),
+            SessionKind::Unknown
+        );
+    }
+
+    #[test]
+    fn monitor_rect_falls_back_when_scale_or_size_is_unusable() {
+        let from_egui = resolve_monitor_rect(Some([800.0, 600.0]), None, None, f32::NAN);
+        assert_eq!((from_egui.width, from_egui.height), (800.0, 600.0));
+        assert_eq!(
+            resolve_monitor_rect(Some([10.0, 10.0]), None, None, 1.0),
+            MonitorRect::default()
+        );
+        let from_x11 = resolve_monitor_rect(None, None, Some((0.0, 0.0, 1920.0, 1080.0)), 2.0);
+        assert_eq!(
+            (from_x11.x, from_x11.y, from_x11.width, from_x11.height),
+            (0.0, 0.0, 960.0, 540.0)
+        );
+        assert_eq!(from_x11.as_tuple(), (0.0, 0.0, 960.0, 540.0));
     }
 }

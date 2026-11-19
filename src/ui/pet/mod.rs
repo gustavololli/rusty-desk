@@ -10,8 +10,8 @@ pub use animation::{AnimationController, AnimationFrame};
 pub use behavior::PetBehavior;
 pub use events::{EmptySection, PetEvent, WindowMode};
 pub use health::{PetSystemHealth, SystemArea};
-pub use renderer::PetRenderer;
 pub use presence::PetPresence;
+pub use renderer::PetRenderer;
 
 #[cfg(test)]
 mod tests {
@@ -84,14 +84,19 @@ mod tests {
         let cfg = PetConfig::default();
         for click in 1..=6 {
             ctrl.on_event(PetEvent::UserClicked, &cfg, AssistantMood::Idle);
-            assert_eq!(ctrl.state(), match click {
-                1 | 2 => AnimationState::Happy,
-                3..=5 => AnimationState::Celebrate,
-                _ => AnimationState::Error,
-            });
+            assert_eq!(
+                ctrl.state(),
+                match click {
+                    1 | 2 => AnimationState::Happy,
+                    3..=5 => AnimationState::Celebrate,
+                    _ => AnimationState::Error,
+                }
+            );
             ctrl.tick(0.12, AssistantMood::Idle, &cfg);
         }
-        for _ in 0..36 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        for _ in 0..36 {
+            ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        }
         assert_eq!(ctrl.state(), AnimationState::Idle);
         ctrl.on_event(PetEvent::UserClicked, &cfg, AssistantMood::Idle);
         assert_eq!(ctrl.state(), AnimationState::Happy);
@@ -114,12 +119,18 @@ mod tests {
     fn empty_section_gives_a_brief_curious_glance() {
         let mut ctrl = AnimationController::default();
         let cfg = PetConfig::default();
-        ctrl.on_event(PetEvent::SectionEmpty(EmptySection::Tasks), &cfg, AssistantMood::Idle);
+        ctrl.on_event(
+            PetEvent::SectionEmpty(EmptySection::Tasks),
+            &cfg,
+            AssistantMood::Idle,
+        );
         let frame = ctrl.tick(0.1, AssistantMood::Idle, &cfg);
         assert_eq!(frame.state, AnimationState::LookAround);
         assert_eq!(frame.particle, ParticleKind::Question);
         assert!(frame.motion.gaze_x > 0.0);
-        for _ in 0..20 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        for _ in 0..20 {
+            ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        }
         assert_eq!(ctrl.state(), AnimationState::Idle);
         let normal = ctrl.tick(0.1, AssistantMood::Idle, &cfg);
         assert_ne!(normal.particle, ParticleKind::Question);
@@ -130,12 +141,23 @@ mod tests {
         let mut ctrl = AnimationController::default();
         let cfg = PetConfig::default();
         ctrl.on_event(PetEvent::AiThinking, &cfg, AssistantMood::Thinking);
-        ctrl.on_event(PetEvent::SectionEmpty(EmptySection::Habits), &cfg, AssistantMood::Thinking);
+        ctrl.on_event(
+            PetEvent::SectionEmpty(EmptySection::Habits),
+            &cfg,
+            AssistantMood::Thinking,
+        );
         assert_eq!(ctrl.state(), AnimationState::Thinking);
 
         let mut ctrl = AnimationController::default();
-        let cfg = PetConfig { auto_animations: false, ..PetConfig::default() };
-        ctrl.on_event(PetEvent::SectionEmpty(EmptySection::Music), &cfg, AssistantMood::Idle);
+        let cfg = PetConfig {
+            auto_animations: false,
+            ..PetConfig::default()
+        };
+        ctrl.on_event(
+            PetEvent::SectionEmpty(EmptySection::Music),
+            &cfg,
+            AssistantMood::Idle,
+        );
         assert_eq!(ctrl.state(), AnimationState::Idle);
     }
 
@@ -147,7 +169,9 @@ mod tests {
         let frame = ctrl.tick(0.05, AssistantMood::Idle, &cfg);
         assert_eq!(frame.state, AnimationState::Celebrate);
         assert_eq!(frame.particle, ParticleKind::Sparkles);
-        for _ in 0..32 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        for _ in 0..32 {
+            ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        }
         assert_eq!(ctrl.state(), AnimationState::Idle);
     }
 
@@ -158,7 +182,9 @@ mod tests {
         ctrl.on_event(PetEvent::PomodoroStarted, &cfg, AssistantMood::Focused);
         ctrl.on_event(PetEvent::LongWorkSession, &cfg, AssistantMood::Focused);
         assert_eq!(ctrl.state(), AnimationState::Sleep);
-        for _ in 0..20 { ctrl.tick(0.1, AssistantMood::Focused, &cfg); }
+        for _ in 0..20 {
+            ctrl.tick(0.1, AssistantMood::Focused, &cfg);
+        }
         assert_eq!(ctrl.state(), AnimationState::Focused);
     }
 
@@ -186,9 +212,13 @@ mod tests {
         assert_eq!(ctrl.state(), AnimationState::Glitch);
         ctrl.on_event(PetEvent::SystemRecovered, &cfg, AssistantMood::Idle);
         assert_eq!(ctrl.state(), AnimationState::Glitch);
-        for _ in 0..16 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        for _ in 0..16 {
+            ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        }
         assert_eq!(ctrl.state(), AnimationState::Happy);
-        for _ in 0..17 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        for _ in 0..17 {
+            ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        }
         assert_eq!(ctrl.state(), AnimationState::Idle);
     }
 
@@ -201,9 +231,13 @@ mod tests {
             ctrl.tick(0.1, AssistantMood::Idle, &cfg);
         }
         assert_eq!(ctrl.state(), AnimationState::Error);
-        for _ in 0..18 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        for _ in 0..18 {
+            ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        }
         assert_eq!(ctrl.state(), AnimationState::LookAround);
-        for _ in 0..18 { ctrl.tick(0.1, AssistantMood::Idle, &cfg); }
+        for _ in 0..18 {
+            ctrl.tick(0.1, AssistantMood::Idle, &cfg);
+        }
         assert_eq!(ctrl.state(), AnimationState::Idle);
     }
 
@@ -254,12 +288,16 @@ mod tests {
         let cfg = PetConfig::default();
         ctrl.set_writing(true, false);
         let mut frame = ctrl.tick(1.0 / 60.0, AssistantMood::Idle, &cfg);
-        for _ in 0..75 { frame = ctrl.tick(1.0 / 60.0, AssistantMood::Idle, &cfg); }
+        for _ in 0..75 {
+            frame = ctrl.tick(1.0 / 60.0, AssistantMood::Idle, &cfg);
+        }
         assert_eq!(frame.state, AnimationState::Idle);
         assert!(frame.motion.gaze_y > 0.8);
         assert!(frame.motion.y > 1.0);
         ctrl.set_writing(false, false);
-        for _ in 0..75 { frame = ctrl.tick(1.0 / 60.0, AssistantMood::Idle, &cfg); }
+        for _ in 0..75 {
+            frame = ctrl.tick(1.0 / 60.0, AssistantMood::Idle, &cfg);
+        }
         assert!(frame.motion.gaze_y.abs() < 0.15);
     }
 
@@ -359,5 +397,110 @@ mod tests {
             assert_ne!(frame.state, AnimationState::Blink);
             assert_eq!(frame.bob_px, 0);
         }
+    }
+
+    #[test]
+    fn lifecycle_events_respect_mood_and_preferences() {
+        let cfg = PetConfig::default();
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::IdleTimeout, &cfg, AssistantMood::Idle);
+        ctrl.on_event(PetEvent::UserDragged, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::WakeUp);
+
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::IdleTimeout, &cfg, AssistantMood::Idle);
+        ctrl.on_event(
+            PetEvent::ModeChanged(WindowMode::Island),
+            &cfg,
+            AssistantMood::Idle,
+        );
+        assert_eq!(ctrl.state(), AnimationState::WakeUp);
+        let mut awake = AnimationController::default();
+        awake.on_event(
+            PetEvent::ModeChanged(WindowMode::Pet),
+            &cfg,
+            AssistantMood::Idle,
+        );
+        assert_eq!(awake.state(), AnimationState::Idle);
+
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::OperationSucceeded, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Happy);
+        ctrl.on_event(PetEvent::AiThinking, &cfg, AssistantMood::Thinking);
+        ctrl.on_event(PetEvent::OperationSucceeded, &cfg, AssistantMood::Thinking);
+        assert_eq!(ctrl.state(), AnimationState::Thinking);
+
+        let quiet = PetConfig {
+            celebrate_tasks: false,
+            ..PetConfig::default()
+        };
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::HabitCompleted, &quiet, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Happy);
+
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::PomodoroStarted, &cfg, AssistantMood::Focused);
+        ctrl.on_event(PetEvent::PomodoroPaused, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Idle);
+        ctrl.on_event(
+            PetEvent::VoiceListeningStart,
+            &cfg,
+            AssistantMood::Listening,
+        );
+        ctrl.on_event(PetEvent::VoiceListeningStop, &cfg, AssistantMood::Focused);
+        assert_eq!(ctrl.state(), AnimationState::Focused);
+
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::IdleTimeout, &cfg, AssistantMood::Idle);
+        ctrl.set_music_playing(true);
+        assert_eq!(ctrl.state(), AnimationState::ListeningMusic);
+
+        let reduced = PetConfig {
+            reduce_animations: true,
+            ..PetConfig::default()
+        };
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(PetEvent::AiError, &reduced, AssistantMood::Idle);
+        assert_eq!(
+            ctrl.tick(0.05, AssistantMood::Idle, &reduced).eye,
+            EyeExpression::ErrorCross
+        );
+        assert_eq!(ctrl.recommended_repaint_ms(true, &reduced), 16);
+        let calm = AnimationController::default();
+        assert_eq!(calm.recommended_repaint_ms(false, &cfg), 16);
+        assert_eq!(calm.recommended_repaint_ms(false, &reduced), 400);
+
+        let mut busy = AnimationController::default();
+        busy.on_event(PetEvent::AiThinking, &cfg, AssistantMood::Thinking);
+        busy.on_event(PetEvent::CuriosityTrigger, &cfg, AssistantMood::Thinking);
+        assert_eq!(busy.state(), AnimationState::Thinking);
+        let mut idle = AnimationController::default();
+        idle.on_event(PetEvent::LongWorkSession, &cfg, AssistantMood::Idle);
+        assert_eq!(idle.state(), AnimationState::Idle);
+        idle.on_event(PetEvent::MarkdownConverted, &cfg, AssistantMood::Idle);
+        assert_eq!(idle.state(), AnimationState::Happy);
+    }
+
+    #[test]
+    fn event_priority_orders_critical_above_low() {
+        assert!(PetEvent::AiError.priority() > PetEvent::UserClicked.priority());
+        assert!(PetEvent::UserClicked.priority() > PetEvent::UserHovered.priority());
+        assert!(PetEvent::UserHovered.priority() > PetEvent::CuriosityTrigger.priority());
+        assert_eq!(
+            PetEvent::PomodoroFinished.priority(),
+            super::events::EventPriority::Critical
+        );
+        assert_eq!(
+            PetEvent::SystemRecovered.priority(),
+            super::events::EventPriority::High
+        );
+        assert_eq!(
+            PetEvent::SectionEmpty(EmptySection::Chat).priority(),
+            super::events::EventPriority::Low
+        );
+        assert_eq!(
+            PetEvent::OperationSucceeded.priority(),
+            super::events::EventPriority::Low
+        );
     }
 }

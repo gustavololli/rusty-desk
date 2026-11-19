@@ -305,3 +305,56 @@ pub fn pixel_button(
         resp.on_hover_text(RichText::new(tooltip).size(12.0).color(IVORY))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PixelIcon;
+
+    const ICONS: [PixelIcon; 34] = [
+        PixelIcon::Chat,
+        PixelIcon::Tasks,
+        PixelIcon::Habits,
+        PixelIcon::Focus,
+        PixelIcon::Organizer,
+        PixelIcon::Markdown,
+        PixelIcon::Compact,
+        PixelIcon::Settings,
+        PixelIcon::NewChat,
+        PixelIcon::History,
+        PixelIcon::Mic,
+        PixelIcon::Attach,
+        PixelIcon::Send,
+        PixelIcon::Copy,
+        PixelIcon::Save,
+        PixelIcon::Clear,
+        PixelIcon::Close,
+        PixelIcon::Pin,
+        PixelIcon::Island,
+        PixelIcon::Play,
+        PixelIcon::Pause,
+        PixelIcon::Reset,
+        PixelIcon::Eye,
+        PixelIcon::Check,
+        PixelIcon::Undo,
+        PixelIcon::FolderOpen,
+        PixelIcon::MusicNote,
+        PixelIcon::PrevTrack,
+        PixelIcon::NextTrack,
+        PixelIcon::Stop,
+        PixelIcon::VolumeOn,
+        PixelIcon::VolumeMuted,
+        PixelIcon::Pet,
+        PixelIcon::Expand,
+    ];
+
+    #[test]
+    fn every_icon_has_pixels_and_a_distinct_bitmap() {
+        assert_eq!(ICONS.len(), 34);
+        let mut seen = std::collections::BTreeSet::new();
+        for icon in ICONS {
+            let bitmap = icon.bitmap();
+            assert!(bitmap.iter().any(|row| *row != 0), "{icon:?} is blank");
+            assert!(seen.insert(bitmap), "{icon:?} duplicates another icon");
+        }
+    }
+}

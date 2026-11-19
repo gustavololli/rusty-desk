@@ -183,7 +183,10 @@ pub struct Database {
 
 impl Database {
     /// Only conversational text is sent to Dreaming (no tool payloads or hidden system prompts).
-    pub fn dreaming_pending_messages(&self, limit: usize) -> anyhow::Result<Vec<(i64, String, String, String)>> {
+    pub fn dreaming_pending_messages(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(i64, String, String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT m.rowid, m.role, m.content, m.id FROM messages m
              JOIN conversations c ON c.id = m.conversation_id
@@ -191,47 +194,80 @@ impl Database {
                AND m.deleted_at IS NULL AND c.deleted_at IS NULL
                AND m.kind = 'text' AND m.role IN ('user','assistant')
                AND m.content IS NOT NULL AND LENGTH(TRIM(m.content)) > 0
-             ORDER BY m.rowid ASC LIMIT ?1")?;
-        let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+             ORDER BY m.rowid ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn dreaming_store_batch(&mut self, last_rowid: i64, source_id: &str, facts: &[String]) -> anyhow::Result<()> {
+    pub fn dreaming_store_batch(
+        &mut self,
+        last_rowid: i64,
+        source_id: &str,
+        facts: &[String],
+    ) -> anyhow::Result<()> {
         let tx = self.conn.transaction()?;
         for content in facts {
             tx.execute("INSERT OR IGNORE INTO dreaming_memories (id, content, source_message_id, created_at)
                         VALUES (?1, ?2, ?3, ?4)", params![Uuid::new_v4().to_string(), content, source_id, Utc::now().to_rfc3339()])?;
         }
-        tx.execute("UPDATE dreaming_state SET last_message_rowid = ?1 WHERE id = 1", [last_rowid])?;
+        tx.execute(
+            "UPDATE dreaming_state SET last_message_rowid = ?1 WHERE id = 1",
+            [last_rowid],
+        )?;
         tx.commit()?;
         Ok(())
     }
 
     pub fn dreaming_list_memories(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT id, content FROM dreaming_memories ORDER BY created_at DESC LIMIT 200")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content FROM dreaming_memories ORDER BY created_at DESC LIMIT 200",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn dreaming_delete_memory(&self, id: &str) -> anyhow::Result<()> {
-        self.conn.execute("DELETE FROM dreaming_memories WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM dreaming_memories WHERE id = ?1", [id])?;
         Ok(())
     }
 
     /// Small, deterministic keyword retrieval; semantic embeddings can be added later.
-    pub fn dreaming_relevant_memories(&self, query: &str, limit: usize) -> anyhow::Result<Vec<String>> {
-        let terms: Vec<String> = query.split(|c: char| !c.is_alphanumeric())
-            .filter(|s| s.chars().count() >= 4).map(|s| s.to_lowercase())
-            .take(12).collect();
-        if terms.is_empty() { return Ok(Vec::new()); }
+    pub fn dreaming_relevant_memories(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let terms: Vec<String> = query
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| s.chars().count() >= 4)
+            .map(|s| s.to_lowercase())
+            .take(12)
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
         let memories = self.dreaming_list_memories()?;
-        let mut scored: Vec<(usize, String)> = memories.into_iter().filter_map(|(_, content)| {
-            let lower = content.to_lowercase();
-            let score = terms.iter().filter(|term| lower.contains(term.as_str())).count();
-            (score > 0).then_some((score, content))
-        }).collect();
-        scored.sort_by(|a,b| b.0.cmp(&a.0));
-        Ok(scored.into_iter().take(limit).map(|(_, content)| content).collect())
+        let mut scored: Vec<(usize, String)> = memories
+            .into_iter()
+            .filter_map(|(_, content)| {
+                let lower = content.to_lowercase();
+                let score = terms
+                    .iter()
+                    .filter(|term| lower.contains(term.as_str()))
+                    .count();
+                (score > 0).then_some((score, content))
+            })
+            .collect();
+        scored.sort_by_key(|item| std::cmp::Reverse(item.0));
+        Ok(scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, content)| content)
+            .collect())
     }
 
     pub fn default_db_path() -> PathBuf {
@@ -1167,5 +1203,72 @@ mod tests {
         assert!(db.list_tracks(&pl.id).unwrap().is_empty());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrations_are_idempotent_and_dreaming_retrieval_ignores_tool_text() {
+        let mut db = Database::open_in_memory().unwrap();
+        let version: i64 = db
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 5);
+        migrations::run_migrations(&mut db.conn).unwrap();
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 5);
+
+        db.ensure_conversation("c1", "Chat").unwrap();
+        let text = NewPersistedMessage {
+            id: "m-text".into(),
+            conversation_id: "c1".into(),
+            role: "user".into(),
+            kind: MessageKind::Text,
+            content: Some("Gustavo prefiere el teclado mecanico".into()),
+            tool_calls_json: None,
+            tool_call_id: None,
+            raw_gemini_parts_json: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        db.append_message(&text).unwrap();
+        db.append_message(&NewPersistedMessage {
+            id: "m-tool".into(),
+            conversation_id: "c1".into(),
+            role: "assistant".into(),
+            kind: MessageKind::ToolCall,
+            content: Some("token secreto de herramienta".into()),
+            tool_calls_json: Some("[]".into()),
+            tool_call_id: None,
+            raw_gemini_parts_json: None,
+            created_at: "2026-01-01T00:00:01Z".into(),
+        })
+        .unwrap();
+        let pending = db.dreaming_pending_messages(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, "user");
+        db.dreaming_store_batch(
+            pending[0].0,
+            "m-text",
+            &[
+                "Gustavo prefiere el teclado mecanico".into(),
+                "El proyecto activo se llama Rusty Desk".into(),
+            ],
+        )
+        .unwrap();
+        assert!(db.dreaming_pending_messages(10).unwrap().is_empty());
+        let found = db.dreaming_relevant_memories("teclado rojo", 2).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("teclado"));
+        assert!(db.dreaming_relevant_memories("el", 5).unwrap().is_empty());
+        let memories = db.dreaming_list_memories().unwrap();
+        assert_eq!(memories.len(), 2);
+        db.dreaming_delete_memory(&memories[0].0).unwrap();
+        assert_eq!(db.dreaming_list_memories().unwrap().len(), 1);
     }
 }

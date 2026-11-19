@@ -117,7 +117,10 @@ pub fn speak_local_async(text: String) {
             let script = "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak([Console]::In.ReadToEnd())";
             if let Ok(mut child) = Command::new("powershell.exe")
                 .args(["-NoProfile", "-NonInteractive", "-Command", script])
-                .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
             {
                 if let Some(mut input) = child.stdin.take() {
                     let _ = input.write_all(text.as_bytes());
@@ -128,17 +131,17 @@ pub fn speak_local_async(text: String) {
         }
         #[cfg(not(windows))]
         {
-        for bin in ["espeak-ng", "espeak", "spd-say"] {
-            let args: Vec<&str> = if bin == "spd-say" {
-                vec![&text]
-            } else {
-                vec!["-v", "es", &text]
-            };
-            if let Ok(mut child) = std::process::Command::new(bin).args(&args).spawn() {
-                let _ = child.wait();
-                break;
+            for bin in ["espeak-ng", "espeak", "spd-say"] {
+                let args: Vec<&str> = if bin == "spd-say" {
+                    vec![&text]
+                } else {
+                    vec!["-v", "es", &text]
+                };
+                if let Ok(mut child) = std::process::Command::new(bin).args(&args).spawn() {
+                    let _ = child.wait();
+                    break;
+                }
             }
-        }
         }
     });
 }

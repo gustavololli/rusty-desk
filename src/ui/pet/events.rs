@@ -80,8 +80,11 @@ impl PetEvent {
             | Self::UserDragged
             | Self::UserHovered => EventPriority::Normal,
             Self::UserReturned => EventPriority::Normal,
-            Self::IdleTimeout | Self::CuriosityTrigger | Self::SectionEmpty(_)
-            | Self::LongWorkSession | Self::OperationSucceeded => EventPriority::Low,
+            Self::IdleTimeout
+            | Self::CuriosityTrigger
+            | Self::SectionEmpty(_)
+            | Self::LongWorkSession
+            | Self::OperationSucceeded => EventPriority::Low,
         }
     }
 }

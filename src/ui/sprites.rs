@@ -393,9 +393,14 @@ pub fn paint_rusty(
 ) {
     // Animated gaze settles before head rotation; existing look sprites stay intact.
     let gaze = if !reduce_animations && frame.state == AnimationState::Idle {
-        if frame.motion.gaze_x.abs() > 0.35 { Some(frame.motion.gaze_x) }
-        else { look_x }
-    } else { look_x };
+        if frame.motion.gaze_x.abs() > 0.35 {
+            Some(frame.motion.gaze_x)
+        } else {
+            look_x
+        }
+    } else {
+        look_x
+    };
     let (state, column) = presented_cell(frame.state, frame.elapsed_ms, reduce_animations, gaze);
     let Some(texture) = sheet_texture(ctx) else {
         painter.rect_filled(rect, 0.0, Color32::from_rgb(242, 160, 21));
@@ -409,12 +414,19 @@ pub fn paint_rusty(
         SHEET_ROWS * NATIVE_SIZE,
     );
     let pose = frame.motion;
-    if reduce_animations || (pose.tilt.abs() < 0.01 && pose.x.abs() < 0.01
-        && pose.y.abs() < 0.01 && (pose.scale_x - 1.0).abs() < 0.001
-        && (pose.scale_y - 1.0).abs() < 0.001) {
-        painter.image(texture.id(), rect,
+    if reduce_animations
+        || (pose.tilt.abs() < 0.01
+            && pose.x.abs() < 0.01
+            && pose.y.abs() < 0.01
+            && (pose.scale_x - 1.0).abs() < 0.001
+            && (pose.scale_y - 1.0).abs() < 0.001)
+    {
+        painter.image(
+            texture.id(),
+            rect,
             Rect::from_min_max(Pos2::new(uv[0], uv[1]), Pos2::new(uv[2], uv[3])),
-            Color32::WHITE);
+            Color32::WHITE,
+        );
         return;
     }
 
@@ -426,10 +438,12 @@ pub fn paint_rusty(
     let (sin, cos) = rad.sin_cos();
     let half = rect.width() * 0.5;
     let mut mesh = egui::Mesh::with_texture(texture.id());
-    for (sx, sy, u, v) in [(-1.0, -1.0, uv[0], uv[1]),
+    for (sx, sy, u, v) in [
+        (-1.0, -1.0, uv[0], uv[1]),
         (1.0, -1.0, uv[2], uv[1]),
         (1.0, 1.0, uv[2], uv[3]),
-        (-1.0, 1.0, uv[0], uv[3])] {
+        (-1.0, 1.0, uv[0], uv[3]),
+    ] {
         let x = sx * half * pose.scale_x;
         let y = sy * half * pose.scale_y;
         mesh.vertices.push(egui::epaint::Vertex {
@@ -867,5 +881,26 @@ mod tests {
             .write_image_data(pixels)
             .map_err(|err| err.to_string())?;
         Ok(())
+    }
+
+    #[test]
+    fn scale_and_crop_reject_bad_inputs_and_paths_follow_the_state() {
+        assert!(scale_nearest(&[1, 2, 3, 4], 2, 2, 1).is_err());
+        let sheet = DecodedImage {
+            width: 2,
+            height: 2,
+            pixels: vec![0; 16],
+        };
+        assert!(crop_frame(&sheet, 2, 1, 0).is_err());
+        assert_eq!(fit_integer_scale(f32::NAN, 96.0), 0.0);
+        assert_eq!(fit_integer_scale(96.0, -1.0), 0.0);
+        assert_eq!(display_side(-4.0, 96.0), -4.0);
+        assert_eq!(
+            frame_path(AnimationState::ListeningMusic, 3),
+            "frames/listening_music/03.png"
+        );
+        assert_eq!(state_row(AnimationState::Glitch), 11);
+        let [u0, _, u1, _] = frame_uv(0, 0, 0, 0, 0);
+        assert!(u0.is_finite() && u1.is_finite());
     }
 }

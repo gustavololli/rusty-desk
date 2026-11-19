@@ -16,10 +16,22 @@ fn corner_points(rect: Rect, size: BezelSize) -> ([f32; 4], [f32; 4]) {
         BezelSize::Notch => 6.0,
     };
     // Always reserve a non-negative center, even on the tiny 88x24 notch.
-    let corner = desired.min((rect.width() * 0.5).floor()).min((rect.height() * 0.5).floor());
+    let corner = desired
+        .min((rect.width() * 0.5).floor())
+        .min((rect.height() * 0.5).floor());
     (
-        [rect.left(), rect.left() + corner, rect.right() - corner, rect.right()],
-        [rect.top(), rect.top() + corner, rect.bottom() - corner, rect.bottom()],
+        [
+            rect.left(),
+            rect.left() + corner,
+            rect.right() - corner,
+            rect.right(),
+        ],
+        [
+            rect.top(),
+            rect.top() + corner,
+            rect.bottom() - corner,
+            rect.bottom(),
+        ],
     )
 }
 
@@ -33,7 +45,11 @@ fn texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
         [image.width as usize, image.height as usize],
         &image.pixels,
     );
-    let handle = ctx.load_texture("rusty-oxidized-frame-9slice-v1", color_image, egui::TextureOptions::NEAREST);
+    let handle = ctx.load_texture(
+        "rusty-oxidized-frame-9slice-v1",
+        color_image,
+        egui::TextureOptions::NEAREST,
+    );
     ctx.data_mut(|data| data.insert_temp(id, handle.clone()));
     Some(handle)
 }

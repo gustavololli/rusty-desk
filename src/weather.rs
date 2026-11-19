@@ -247,4 +247,44 @@ mod tests {
         assert!(msg.contains("22.4°C"));
         assert!(msg.contains("58%"));
     }
+
+    #[test]
+    fn wmo_codes_map_to_stable_spanish_labels_and_empty_city_does_not_fetch() {
+        for (code, desc) in [
+            (0, "Despejado"),
+            (3, "Nublado"),
+            (45, "Niebla"),
+            (55, "Llovizna"),
+            (61, "Lluvia"),
+            (71, "Nieve"),
+            (80, "Chaparrones"),
+            (95, "Tormenta eléctrica"),
+            (96, "Tormenta con granizo"),
+            (999, "Condición variable"),
+        ] {
+            assert_eq!(describe_wmo_code(code).1, desc);
+        }
+        let err = fetch_weather_blocking("   ").unwrap_err();
+        assert!(err.contains("ciudad"), "{err}");
+    }
+
+    #[test]
+    fn location_label_skips_a_repeated_admin_area() {
+        let place = GeocodingPlace {
+            name: "Córdoba".into(),
+            latitude: 0.0,
+            longitude: 0.0,
+            country: Some("Argentina".into()),
+            admin1: Some("Córdoba".into()),
+        };
+        assert_eq!(build_location_label(&place), "Córdoba, Argentina");
+        let bare = GeocodingPlace {
+            name: "Ushuaia".into(),
+            latitude: 0.0,
+            longitude: 0.0,
+            country: Some(String::new()),
+            admin1: None,
+        };
+        assert_eq!(build_location_label(&bare), "Ushuaia");
+    }
 }

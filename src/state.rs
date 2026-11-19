@@ -518,17 +518,15 @@ impl AppData {
                     }
                     data
                 }
-                Err(e) => {
-                    let mut fallback = Self::default();
-                    fallback.startup_error = Some(format!("Error cargando SQLite: {e}"));
-                    fallback
-                }
+                Err(e) => Self {
+                    startup_error: Some(format!("Error cargando SQLite: {e}")),
+                    ..Self::default()
+                },
             },
-            Err(e) => {
-                let mut fallback = Self::default();
-                fallback.startup_error = Some(format!("Error abriendo/migrando SQLite: {e}"));
-                fallback
-            }
+            Err(e) => Self {
+                startup_error: Some(format!("Error abriendo/migrando SQLite: {e}")),
+                ..Self::default()
+            },
         }
     }
 
@@ -1498,5 +1496,38 @@ mod tests {
         data.focus_on_task(&t1.id, true);
         data.delete_task_at(0).unwrap();
         assert_eq!(data.active_task_display_title(), None);
+    }
+
+    #[test]
+    fn clock_format_habit_rollover_and_phase_codes_are_stable() {
+        let mut timer = PomodoroState {
+            remaining_secs: 125,
+            ..PomodoroState::default()
+        };
+        assert_eq!(timer.formatted_time(), "02:05");
+        timer.remaining_secs = 0;
+        assert_eq!(timer.formatted_time(), "00:00");
+        for phase in [
+            PomodoroPhase::Idle,
+            PomodoroPhase::Work,
+            PomodoroPhase::Break,
+        ] {
+            assert_eq!(str_to_phase(phase_to_str(phase)), phase);
+        }
+        assert_eq!(str_to_phase("nope"), PomodoroPhase::Idle);
+        assert_eq!(
+            str_to_prompt("WorkFinished"),
+            Some(PomodoroPrompt::WorkFinished)
+        );
+        assert_eq!(str_to_prompt(""), None);
+        assert_eq!(format_local_datetime_from_utc("not-a-date"), "not-a-date");
+
+        let mut habit = HabitItem::new("Agua", "💧", 0);
+        assert_eq!(habit.daily_goal, 1);
+        habit.current_count = 4;
+        habit.last_date = habit.last_date.pred_opt().unwrap();
+        habit.ensure_today();
+        assert_eq!(habit.current_count, 0);
+        assert_eq!(habit.last_date, chrono::Local::now().date_naive());
     }
 }

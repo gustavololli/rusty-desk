@@ -65,3 +65,41 @@ impl PetBehavior {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PetConfig;
+
+    #[test]
+    fn busy_work_wakes_the_pet_and_reduced_motion_skips_curiosity() {
+        let mut behavior = PetBehavior::new(0.0);
+        let cfg = PetConfig {
+            sleep_after_mins: 1,
+            ..PetConfig::default()
+        };
+        assert_eq!(
+            behavior.tick(60.0, false, &cfg),
+            Some(PetEvent::IdleTimeout)
+        );
+        assert!(behavior.is_sleeping());
+        assert_eq!(behavior.tick(120.0, true, &cfg), None);
+        assert!(!behavior.is_sleeping());
+
+        let mut quiet = PetBehavior::new(0.0);
+        let reduced = PetConfig {
+            reduce_animations: true,
+            ..PetConfig::default()
+        };
+        assert_eq!(quiet.tick(30.0, false, &reduced), None);
+
+        let mut never = PetBehavior::new(0.0);
+        let no_sleep = PetConfig {
+            sleep_after_mins: 0,
+            auto_animations: false,
+            ..PetConfig::default()
+        };
+        assert_eq!(never.tick(10_000.0, false, &no_sleep), None);
+        assert!(!never.is_sleeping());
+    }
+}

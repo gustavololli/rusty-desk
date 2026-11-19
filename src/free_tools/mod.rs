@@ -14,7 +14,9 @@ use crate::persistence::Database;
 
 use exchange::FrankfurterProvider;
 use fetch::{fetch_url_safe, format_untrusted_fetch_for_llm};
-use search::{BraveProvider, LangSearchProvider, SearchProvider, SearchQuery, SearchResponse, TavilyProvider};
+use search::{
+    BraveProvider, LangSearchProvider, SearchProvider, SearchQuery, SearchResponse, TavilyProvider,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FreeToolError {
@@ -357,7 +359,8 @@ impl FreeToolsEngine {
                 Arc::new(BraveProvider::new(self.client.clone(), &cfg.brave.api_key))
             }
             SearchProviderId::LangSearch => Arc::new(LangSearchProvider::new(
-                self.client.clone(), &cfg.langsearch.api_key,
+                self.client.clone(),
+                &cfg.langsearch.api_key,
             )),
             SearchProviderId::Searxng => Arc::new(search::SearxngProvider {
                 client: self.client.clone(),
@@ -369,9 +372,21 @@ impl FreeToolsEngine {
 
     fn provider_order(&self, cfg: &ExternalToolsConfig) -> Vec<SearchProviderId> {
         match cfg.preferred_search_provider {
-            SearchProviderId::Tavily => vec![SearchProviderId::Tavily, SearchProviderId::LangSearch, SearchProviderId::Brave],
-            SearchProviderId::Brave => vec![SearchProviderId::Brave, SearchProviderId::LangSearch, SearchProviderId::Tavily],
-            SearchProviderId::LangSearch => vec![SearchProviderId::LangSearch, SearchProviderId::Tavily, SearchProviderId::Brave],
+            SearchProviderId::Tavily => vec![
+                SearchProviderId::Tavily,
+                SearchProviderId::LangSearch,
+                SearchProviderId::Brave,
+            ],
+            SearchProviderId::Brave => vec![
+                SearchProviderId::Brave,
+                SearchProviderId::LangSearch,
+                SearchProviderId::Tavily,
+            ],
+            SearchProviderId::LangSearch => vec![
+                SearchProviderId::LangSearch,
+                SearchProviderId::Tavily,
+                SearchProviderId::Brave,
+            ],
             SearchProviderId::Searxng => vec![
                 SearchProviderId::Searxng,
                 SearchProviderId::Tavily,
@@ -829,16 +844,21 @@ mod tests {
         }
 
         let mut ok_count = 0;
-        let mut quota_err_count = 0;
+        let mut rejected = 0;
         for h in handles {
             match h.await.unwrap() {
                 Ok(_) => ok_count += 1,
-                Err(FreeToolError::QuotaExceeded(_)) => quota_err_count += 1,
+                // A spent Tavily budget falls through to LangSearch, which is
+                // disabled in this config, so the surfaced error is NotConfigured.
+                // QuotaExceeded is still accepted if fallback stops earlier.
+                Err(FreeToolError::QuotaExceeded(_)) | Err(FreeToolError::NotConfigured(_)) => {
+                    rejected += 1;
+                }
                 Err(e) => panic!("unexpected error: {e}"),
             }
         }
-        assert_eq!(ok_count, 2);
-        assert_eq!(quota_err_count, 3);
+        assert_eq!(ok_count, 2, "local budget must admit only two reservations");
+        assert_eq!(rejected, 3);
         assert_eq!(engine.provider_usage("tavily", &cfg.tavily).0, 2);
     }
 
@@ -933,5 +953,28 @@ mod tests {
             lim.try_acquire("get_weather"),
             Err(FreeToolError::QuotaExceeded(_))
         ));
+    }
+
+    #[test]
+    fn billing_period_clamps_the_reset_day() {
+        use chrono::Datelike;
+        assert_eq!(current_period_key(None), None);
+        let today = chrono::Utc::now().date_naive();
+        let this_month = format!("{:04}-{:02}", today.year(), today.month());
+        assert_eq!(
+            current_period_key(Some(1)).as_deref(),
+            Some(format!("{this_month}-d01").as_str())
+        );
+        let high = current_period_key(Some(99)).unwrap();
+        assert!(high.ends_with("-d28"), "{high}");
+        if today.day() >= 28 {
+            assert!(high.starts_with(&this_month), "{high}");
+        } else {
+            assert!(!high.starts_with(&this_month), "{high}");
+        }
+        assert_eq!(
+            current_period_key(Some(0)).unwrap().rsplit('-').next(),
+            Some("d01")
+        );
     }
 }

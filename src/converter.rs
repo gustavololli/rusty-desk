@@ -18,7 +18,8 @@ impl CompactionMode {
             "none" | "normal" | "ninguna" => Self::None,
             "line" | "linea" | "lines" => Self::LineByLine,
             "extreme" | "extrema" | "max" => Self::Extreme,
-            "moderate" | "moderada" | _ => Self::Moderate,
+            // "moderate", "moderada", empty, and unknown values share this default.
+            _ => Self::Moderate,
         }
     }
 
@@ -50,7 +51,7 @@ pub fn compact_for_llm(input: &str, mode: CompactionMode) -> String {
 
             for raw_line in normalized.lines() {
                 let collapsed: String = raw_line
-                    .split(|c| c == ' ' || c == '\t')
+                    .split([' ', '\t'])
                     .filter(|part| !part.is_empty())
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -151,7 +152,7 @@ fn extract_pdf_with_pdftotext(path: &Path) -> Result<String, String> {
     }
     #[cfg(not(windows))]
     {
-    let output = Command::new("pdftotext")
+        let output = Command::new("pdftotext")
         .arg("-layout")
         .arg(path)
         .arg("-")
@@ -162,26 +163,26 @@ fn extract_pdf_with_pdftotext(path: &Path) -> Result<String, String> {
             )
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Error al extraer texto del PDF con pdftotext: {stderr}"
-        ));
-    }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "Error al extraer texto del PDF con pdftotext: {stderr}"
+            ));
+        }
 
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        return Err(
-            "El PDF no contiene texto extraíble (posiblemente sea una imagen escaneada)."
-                .to_string(),
-        );
-    }
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() {
+            return Err(
+                "El PDF no contiene texto extraíble (posiblemente sea una imagen escaneada)."
+                    .to_string(),
+            );
+        }
 
-    let title = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("Documento PDF");
-    Ok(format!("# {title}\n\n{text}\n"))
+        let title = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Documento PDF");
+        Ok(format!("# {title}\n\n{text}\n"))
     }
 }
 
@@ -223,47 +224,47 @@ pub fn pick_files_dialog() -> Result<Vec<PathBuf>, String> {
 
     #[cfg(not(windows))]
     {
-    if let Ok(output) = Command::new("zenity")
-        .args([
-            "--file-selection",
-            "--multiple",
-            "--separator=\n",
-            "--title=Seleccionar archivo para MarkItDown",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let paths: Vec<PathBuf> = stdout
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(PathBuf::from)
-                .collect();
-            return Ok(paths);
+        if let Ok(output) = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--multiple",
+                "--separator=\n",
+                "--title=Seleccionar archivo para MarkItDown",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let paths: Vec<PathBuf> = stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+                return Ok(paths);
+            }
+            // User cancelled dialog
+            return Ok(Vec::new());
         }
-        // User cancelled dialog
-        return Ok(Vec::new());
-    }
 
-    if let Ok(output) = Command::new("kdialog")
-        .args(["--getopenfilename", ".", "--multiple", "--separate-output"])
-        .output()
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let paths: Vec<PathBuf> = stdout
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(PathBuf::from)
-                .collect();
-            return Ok(paths);
+        if let Ok(output) = Command::new("kdialog")
+            .args(["--getopenfilename", ".", "--multiple", "--separate-output"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let paths: Vec<PathBuf> = stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+                return Ok(paths);
+            }
+            return Ok(Vec::new());
         }
-        return Ok(Vec::new());
-    }
 
-    Err("No se encontró 'zenity' ni 'kdialog' para abrir el selector de archivos. Podés arrastrar y soltar el archivo directamente.".to_string())
+        Err("No se encontró 'zenity' ni 'kdialog' para abrir el selector de archivos. Podés arrastrar y soltar el archivo directamente.".to_string())
     }
 }
 
@@ -282,5 +283,42 @@ mod tests {
 
         let extreme = compact_for_llm(sample, CompactionMode::Extreme);
         assert_eq!(extreme, "# Título - Item 1 - Item 2");
+    }
+
+    #[test]
+    fn compaction_aliases_crlf_unicode_stats_and_missing_files() {
+        assert_eq!(
+            CompactionMode::from_str_opt(Some("NINGUNA")),
+            CompactionMode::None
+        );
+        assert_eq!(
+            CompactionMode::from_str_opt(Some("linea")),
+            CompactionMode::LineByLine
+        );
+        assert_eq!(
+            CompactionMode::from_str_opt(Some("MAX")),
+            CompactionMode::Extreme
+        );
+        assert_eq!(CompactionMode::from_str_opt(None), CompactionMode::Moderate);
+        assert_eq!(
+            CompactionMode::from_str_opt(Some("no-such")).label(),
+            "Moderada (Markdown)"
+        );
+        assert_eq!(compact_for_llm("hola", CompactionMode::None), "hola");
+        assert_eq!(
+            compact_for_llm("a  \r\nb\r\n\r\n\r\nc", CompactionMode::Moderate),
+            "a\nb\n\nc"
+        );
+
+        let (orig, compact, saved) = compaction_stats("áááá", "á");
+        assert_eq!((orig, compact), (4, 1));
+        assert!((saved - 75.0).abs() < 0.01);
+        assert_eq!(compaction_stats("", "").2, 0.0);
+
+        let missing = convert_file_to_markdown(Path::new("/tmp/rusty-desk-missing-file.md"));
+        assert!(missing.unwrap_err().contains("no existe"));
+        assert!(convert_file_to_markdown(Path::new("."))
+            .unwrap_err()
+            .contains("no es un archivo"));
     }
 }

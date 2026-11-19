@@ -118,7 +118,11 @@ impl OpenAiCompatibleProvider {
 
     /// Dreaming can take much longer than a normal interactive chat on local CPUs.
     pub fn new_with_timeout(
-        base_url: String, api_key: String, model: String, stt_model: String, timeout_secs: u64,
+        base_url: String,
+        api_key: String,
+        model: String,
+        stt_model: String,
+        timeout_secs: u64,
     ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -825,22 +829,29 @@ mod tests {
             (503, overloaded.clone()),
             (503, overloaded.clone()),
             (503, overloaded),
-            (200, r#"{"candidates":[{"content":{"parts":[{"text":"Volví"}]}}]}"#.to_string()),
+            (
+                200,
+                r#"{"candidates":[{"content":{"parts":[{"text":"Volví"}]}}]}"#.to_string(),
+            ),
         ]);
-        let provider = GoogleGeminiProvider::new(
-            base_url, "test-key".into(), "gemini-flash-latest".into(),
-        );
-        let response = provider.chat(&[ChatMessage::user("Hola")], &[]).await.unwrap();
+        let provider =
+            GoogleGeminiProvider::new(base_url, "test-key".into(), "gemini-flash-latest".into());
+        let response = provider
+            .chat(&[ChatMessage::user("Hola")], &[])
+            .await
+            .unwrap();
         assert_eq!(response.content.as_deref(), Some("Volví"));
     }
 
     #[tokio::test]
     async fn gemini_other_client_errors_never_trigger_fallback() {
         let base_url = spawn_mock_http_server(vec![(400, "invalid model".into())]);
-        let provider = GoogleGeminiProvider::new(
-            base_url, "test-key".into(), "gemini-flash-latest".into(),
-        );
-        let err = provider.chat(&[ChatMessage::user("Hola")], &[]).await.unwrap_err();
+        let provider =
+            GoogleGeminiProvider::new(base_url, "test-key".into(), "gemini-flash-latest".into());
+        let err = provider
+            .chat(&[ChatMessage::user("Hola")], &[])
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("400"));
     }
 }

@@ -273,7 +273,11 @@ impl AnimationController {
             }
             PetEvent::AllTasksCompleted => {
                 if config.celebrate_tasks {
-                    self.transition(AnimationState::Celebrate, EventPriority::High, Some(2.8 * intensity_scale));
+                    self.transition(
+                        AnimationState::Celebrate,
+                        EventPriority::High,
+                        Some(2.8 * intensity_scale),
+                    );
                 } else {
                     self.transition(AnimationState::Happy, EventPriority::High, Some(1.2));
                 }
@@ -329,7 +333,9 @@ impl AnimationController {
                 if self.state == AnimationState::Idle && config.auto_animations {
                     let right = matches!(section, EmptySection::Tasks | EmptySection::Music);
                     self.look_dir_x = if right { 1 } else { -1 };
-                    if !config.reduce_animations { self.motion.notice(right); }
+                    if !config.reduce_animations {
+                        self.motion.notice(right);
+                    }
                     self.transition(AnimationState::LookAround, EventPriority::Low, Some(1.8));
                     self.empty_section_reaction = Some(section);
                 }
@@ -398,7 +404,8 @@ impl AnimationController {
             }
         }
 
-        if self.recovery_pending && self.state_duration.is_none()
+        if self.recovery_pending
+            && self.state_duration.is_none()
             && matches!(self.state, AnimationState::Idle | AnimationState::Focused)
         {
             self.recovery_pending = false;
@@ -412,8 +419,11 @@ impl AnimationController {
         if self.teased_glance_pending {
             if self.total_time >= self.teased_until {
                 self.teased_glance_pending = false;
-            } else if self.state == AnimationState::Idle && self.state_duration.is_none()
-                && config.auto_animations && !config.reduce_animations {
+            } else if self.state == AnimationState::Idle
+                && self.state_duration.is_none()
+                && config.auto_animations
+                && !config.reduce_animations
+            {
                 self.look_dir_x = -2;
                 self.motion.notice(false);
                 self.transition(AnimationState::LookAround, EventPriority::Low, Some(1.35));

@@ -113,6 +113,72 @@ pub fn infer_title_from_uri(uri: &str) -> String {
         .to_string()
 }
 
+/// How `/play` chooses a track. A number is 1-based and only applies when it
+/// fits the list that is already loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaySelector {
+    Current,
+    Index(usize),
+    Text(String),
+}
+
+pub fn classify_play_query(query: Option<&str>, current_len: usize) -> PlaySelector {
+    let Some(raw) = query.map(str::trim).filter(|q| !q.is_empty()) else {
+        return PlaySelector::Current;
+    };
+    if let Ok(num) = raw.parse::<usize>() {
+        if num >= 1 && num <= current_len {
+            return PlaySelector::Index(num - 1);
+        }
+    }
+    PlaySelector::Text(raw.to_string())
+}
+
+/// Case-insensitive match against a track title or URI. `tracks` is `(title, uri)`.
+pub fn find_track_index(tracks: &[(&str, &str)], needle: &str) -> Option<usize> {
+    let needle = needle.to_lowercase();
+    tracks.iter().position(|(title, uri)| {
+        title.to_lowercase().contains(&needle) || uri.to_lowercase().contains(&needle)
+    })
+}
+
+/// Local players tried in order. ffplay is first because its volume is 0..=100.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerLaunch {
+    pub program: &'static str,
+    pub args: Vec<String>,
+}
+
+pub fn player_launch_plans(uri: &str) -> Vec<PlayerLaunch> {
+    vec![
+        PlayerLaunch {
+            program: "ffplay",
+            args: vec![
+                "-nodisp".into(),
+                "-autoexit".into(),
+                "-loglevel".into(),
+                "quiet".into(),
+                "-volume".into(),
+                "100".into(),
+                uri.into(),
+            ],
+        },
+        PlayerLaunch {
+            program: "gst-play-1.0",
+            args: vec![
+                "--quiet".into(),
+                "--volume".into(),
+                "1.00".into(),
+                uri.into(),
+            ],
+        },
+        PlayerLaunch {
+            program: "mpg123",
+            args: vec!["-q".into(), uri.into()],
+        },
+    ]
+}
+
 /// Reads and parses a `.m3u` or `.m3u8` file from disk, returning `(playlist_name, tracks)`.
 pub fn parse_m3u_file(path: &Path) -> Result<(String, Vec<M3uTrack>), String> {
     let bytes = fs::read(path).map_err(|e| format!("No se pudo leer '{}': {e}", path.display()))?;
@@ -141,41 +207,41 @@ pub fn pick_m3u_file_dialog() -> Result<Option<PathBuf>, String> {
     }
     #[cfg(not(windows))]
     {
-    if let Ok(out) = Command::new("kdialog")
-        .args([
-            "--getopenfilename",
-            ".",
-            "*.m3u *.m3u8|Playlists M3U (*.m3u, *.m3u8)",
-        ])
-        .output()
-    {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return Ok((!p.is_empty()).then(|| PathBuf::from(p)));
+        if let Ok(out) = Command::new("kdialog")
+            .args([
+                "--getopenfilename",
+                ".",
+                "*.m3u *.m3u8|Playlists M3U (*.m3u, *.m3u8)",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                return Ok((!p.is_empty()).then(|| PathBuf::from(p)));
+            }
+            if out.status.code() == Some(1) {
+                return Ok(None);
+            }
         }
-        if out.status.code() == Some(1) {
-            return Ok(None);
-        }
-    }
 
-    if let Ok(out) = Command::new("zenity")
-        .args([
-            "--file-selection",
-            "--title=Seleccionar playlist .m3u",
-            "--file-filter=Playlists M3U (*.m3u *.m3u8) | *.m3u *.m3u8",
-        ])
-        .output()
-    {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return Ok((!p.is_empty()).then(|| PathBuf::from(p)));
+        if let Ok(out) = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--title=Seleccionar playlist .m3u",
+                "--file-filter=Playlists M3U (*.m3u *.m3u8) | *.m3u *.m3u8",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                return Ok((!p.is_empty()).then(|| PathBuf::from(p)));
+            }
+            if out.status.code() == Some(1) {
+                return Ok(None);
+            }
         }
-        if out.status.code() == Some(1) {
-            return Ok(None);
-        }
-    }
 
-    Err("No se encontró kdialog ni zenity para abrir el selector de archivos.".to_string())
+        Err("No se encontró kdialog ni zenity para abrir el selector de archivos.".to_string())
     }
 }
 
@@ -255,11 +321,16 @@ impl VolumeBackend for WindowsVolumeBackend {
             }
             struct UninitCom;
             impl Drop for UninitCom {
-                fn drop(&mut self) { unsafe { CoUninitialize(); } }
+                fn drop(&mut self) {
+                    unsafe {
+                        CoUninitialize();
+                    }
+                }
             }
             let _com = UninitCom;
             let apply = || -> windows::core::Result<bool> {
-                let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+                let enumerator: IMMDeviceEnumerator =
+                    CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
                 let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
                 let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
                 let sessions = manager.GetSessionEnumerator()?;
@@ -267,9 +338,12 @@ impl VolumeBackend for WindowsVolumeBackend {
                 for i in 0..sessions.GetCount()? {
                     let session = sessions.GetSession(i)?;
                     let info: IAudioSessionControl2 = session.cast()?;
-                    if info.GetProcessId()? != pid { continue; }
+                    if info.GetProcessId()? != pid {
+                        continue;
+                    }
                     let control: ISimpleAudioVolume = session.cast()?;
-                    control.SetMasterVolume(volume_pct.min(100) as f32 / 100.0, std::ptr::null())?;
+                    control
+                        .SetMasterVolume(volume_pct.min(100) as f32 / 100.0, std::ptr::null())?;
                     control.SetMute(muted, std::ptr::null())?;
                     matched = true;
                 }
@@ -362,7 +436,9 @@ pub struct MusicPlayer {
 impl Default for MusicPlayer {
     fn default() -> Self {
         #[cfg(windows)]
-        { return Self::with_backend(Arc::new(WindowsVolumeBackend)); }
+        {
+            return Self::with_backend(Arc::new(WindowsVolumeBackend));
+        }
         #[cfg(not(windows))]
         Self::with_backend(Arc::new(PactlVolumeBackend))
     }
@@ -499,57 +575,32 @@ impl MusicPlayer {
         self.paused = false;
 
         // Spawn at 100% internal gain so `pactl` can scale smoothly across 0..=100% and mute/unmute.
-        if let Ok(child) = Command::new("ffplay")
-            .args([
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "quiet",
-                "-volume",
-                "100",
-                uri,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            let pid = child.id();
-            self.child = Some(child);
-            self.push_worker_target(pid, 40);
-            return Ok(());
-        }
-
-        if let Ok(child) = Command::new("gst-play-1.0")
-            .args(["--quiet", "--volume", "1.00", uri])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            let pid = child.id();
-            self.child = Some(child);
-            self.push_worker_target(pid, 40);
-            return Ok(());
-        }
-
-        if let Ok(child) = Command::new("mpg123")
-            .args(["-q", uri])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            let pid = child.id();
-            self.child = Some(child);
-            self.push_worker_target(pid, 40);
-            return Ok(());
+        for plan in player_launch_plans(uri) {
+            if let Ok(child) = Command::new(plan.program)
+                .args(&plan.args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                let pid = child.id();
+                self.child = Some(child);
+                self.push_worker_target(pid, 40);
+                return Ok(());
+            }
         }
 
         #[cfg(windows)]
-        { Err("No se encontró ffplay. Instalá FFmpeg y agregá ffplay.exe al PATH para reproducir música en Windows.".to_string()) }
+        {
+            Err("No se encontró ffplay. Instalá FFmpeg y agregá ffplay.exe al PATH para reproducir música en Windows.".to_string())
+        }
         #[cfg(not(windows))]
-        { Err("No se encontró un reproductor compatible (ffplay, gst-play-1.0 o mpg123).".to_string()) }
+        {
+            Err(
+                "No se encontró un reproductor compatible (ffplay, gst-play-1.0 o mpg123)."
+                    .to_string(),
+            )
+        }
     }
 
     pub fn pause(&mut self) {
@@ -564,12 +615,12 @@ impl MusicPlayer {
         }
         #[cfg(not(windows))]
         {
-        if let Some(pid) = self.child.as_ref().map(Child::id) {
-            let _ = Command::new("kill")
-                .args(["-STOP", &pid.to_string()])
-                .status();
-            self.paused = true;
-        }
+            if let Some(pid) = self.child.as_ref().map(Child::id) {
+                let _ = Command::new("kill")
+                    .args(["-STOP", &pid.to_string()])
+                    .status();
+                self.paused = true;
+            }
         }
     }
 
@@ -578,16 +629,18 @@ impl MusicPlayer {
             return;
         }
         #[cfg(windows)]
-        { return; }
+        {
+            return;
+        }
         #[cfg(not(windows))]
         {
-        if let Some(pid) = self.child.as_ref().map(Child::id) {
-            let _ = Command::new("kill")
-                .args(["-CONT", &pid.to_string()])
-                .status();
-            self.paused = false;
-            self.push_worker_target(pid, 4);
-        }
+            if let Some(pid) = self.child.as_ref().map(Child::id) {
+                let _ = Command::new("kill")
+                    .args(["-CONT", &pid.to_string()])
+                    .status();
+                self.paused = false;
+                self.push_worker_target(pid, 4);
+            }
         }
     }
 
@@ -837,5 +890,77 @@ Client #112
             "volume backend must receive updates from slider/mute"
         );
         assert!(calls.iter().any(|&(p, v, m)| p == pid && v == 65 && !m));
+    }
+
+    #[test]
+    fn player_launch_plans_prefer_ffplay_and_keep_the_uri_as_data() {
+        let plans = player_launch_plans("https://radio.example.com/live.mp3");
+        assert_eq!(
+            plans.iter().map(|plan| plan.program).collect::<Vec<_>>(),
+            vec!["ffplay", "gst-play-1.0", "mpg123"]
+        );
+        assert_eq!(
+            plans[0].args,
+            [
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+                "-volume",
+                "100",
+                "https://radio.example.com/live.mp3",
+            ]
+        );
+        assert_eq!(plans[1].args[1], "--volume");
+        assert_eq!(plans[1].args[2], "1.00");
+        assert_eq!(plans[2].args, ["-q", "https://radio.example.com/live.mp3"]);
+        for plan in &plans {
+            assert_eq!(
+                plan.args.last().map(String::as_str),
+                Some("https://radio.example.com/live.mp3")
+            );
+            assert!(plan.args.iter().all(|arg| !arg.contains(' ')));
+        }
+    }
+
+    #[test]
+    fn playlist_parser_skips_comments_and_titles_come_from_the_uri() {
+        let m3u = "\u{feff}# comment\n#EXTINF:not-a-number,  \nsongs\\nested\\track.mp3\n\nonly-a-file.ogg\n";
+        let tracks = parse_m3u_content(m3u, Some(Path::new("/music")));
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].duration_secs, None);
+        assert_eq!(tracks[0].title, "track");
+        assert_eq!(tracks[0].uri, "/music/songs/nested/track.mp3");
+        assert_eq!(tracks[1].title, "only-a-file");
+        assert_eq!(
+            infer_title_from_uri("https://cdn.example/a/b.mp3?x=1"),
+            "b.mp3?x=1"
+        );
+        assert!(parse_m3u_content("# nothing\n", None).is_empty());
+        assert!(normalize_audio_url("rtsp://cam.local/stream").is_ok());
+        assert!(normalize_audio_url("file:///tmp/a.mp3").is_ok());
+        assert!(normalize_audio_url("ftp://nope").is_err());
+    }
+
+    #[test]
+    fn play_query_uses_a_one_based_index_then_title_or_uri() {
+        assert_eq!(classify_play_query(None, 3), PlaySelector::Current);
+        assert_eq!(classify_play_query(Some("  "), 3), PlaySelector::Current);
+        assert_eq!(classify_play_query(Some("2"), 3), PlaySelector::Index(1));
+        assert_eq!(
+            classify_play_query(Some("0"), 3),
+            PlaySelector::Text("0".into())
+        );
+        assert_eq!(
+            classify_play_query(Some("4"), 3),
+            PlaySelector::Text("4".into())
+        );
+        let tracks = [
+            ("LoFi Radio", "https://example/lofi"),
+            ("Morning", "/tmp/morning.mp3"),
+        ];
+        assert_eq!(find_track_index(&tracks, "LOFI"), Some(0));
+        assert_eq!(find_track_index(&tracks, "morning.mp3"), Some(1));
+        assert_eq!(find_track_index(&tracks, "missing"), None);
     }
 }

@@ -15,8 +15,12 @@ pub struct PetPresence {
 
 impl PetPresence {
     pub fn on_input(&mut self, now: f64) -> Option<PetEvent> {
-        if !now.is_finite() { return None; }
-        let returning = self.last_input_at.is_some_and(|last| now - last >= RETURN_AFTER_SECS);
+        if !now.is_finite() {
+            return None;
+        }
+        let returning = self
+            .last_input_at
+            .is_some_and(|last| now - last >= RETURN_AFTER_SECS);
         self.last_input_at = Some(now);
         returning.then_some(PetEvent::UserReturned)
     }
