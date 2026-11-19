@@ -844,16 +844,21 @@ mod tests {
         }
 
         let mut ok_count = 0;
-        let mut quota_err_count = 0;
+        let mut rejected = 0;
         for h in handles {
             match h.await.unwrap() {
                 Ok(_) => ok_count += 1,
-                Err(FreeToolError::QuotaExceeded(_)) => quota_err_count += 1,
+                // A spent Tavily budget falls through to LangSearch, which is
+                // disabled in this config, so the surfaced error is NotConfigured.
+                // QuotaExceeded is still accepted if fallback stops earlier.
+                Err(FreeToolError::QuotaExceeded(_)) | Err(FreeToolError::NotConfigured(_)) => {
+                    rejected += 1;
+                }
                 Err(e) => panic!("unexpected error: {e}"),
             }
         }
-        assert_eq!(ok_count, 2);
-        assert_eq!(quota_err_count, 3);
+        assert_eq!(ok_count, 2, "local budget must admit only two reservations");
+        assert_eq!(rejected, 3);
         assert_eq!(engine.provider_usage("tavily", &cfg.tavily).0, 2);
     }
 
