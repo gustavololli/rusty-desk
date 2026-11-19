@@ -682,4 +682,80 @@ mod tests {
         assert!(selected.iter().any(|t| t.function.name == "start_pomodoro"));
         assert!(selected.len() < tool_definitions().len());
     }
+
+    #[test]
+    fn slash_commands_cover_aliases_invalid_forms_and_tool_categories() {
+        assert!(matches!(
+            parse_local_command("/ayuda"),
+            Some(LocalCommand::Help(_))
+        ));
+        assert!(matches!(
+            parse_local_command("/tarea"),
+            Some(LocalCommand::Invalid(_))
+        ));
+        assert_eq!(
+            parse_local_command("/agua"),
+            Some(LocalCommand::Tool {
+                name: "log_habit",
+                args: json!({ "name": "Vasos de agua", "delta": 1 })
+            })
+        );
+        assert_eq!(
+            parse_local_command("/habito Leer 2"),
+            Some(LocalCommand::Tool {
+                name: "log_habit",
+                args: json!({ "name": "Leer", "delta": 2 })
+            })
+        );
+        assert_eq!(
+            parse_local_command("/ordenar deshacer"),
+            Some(LocalCommand::Tool {
+                name: "undo_organize_desktop",
+                args: json!({})
+            })
+        );
+        assert!(matches!(
+            parse_local_command("/pomodoro pronto"),
+            Some(LocalCommand::Invalid(_))
+        ));
+        assert_eq!(
+            parse_local_command("/exchange 10,5 usd eur"),
+            Some(LocalCommand::External {
+                name: "get_exchange_rate",
+                args: json!({ "amount": 10.5, "base": "USD", "target": "EUR" })
+            })
+        );
+        assert_eq!(
+            parse_local_command("/cambio USD ARS"),
+            Some(LocalCommand::External {
+                name: "get_exchange_rate",
+                args: json!({ "amount": 1.0, "base": "USD", "target": "ARS" })
+            })
+        );
+        assert!(matches!(
+            parse_local_command("/nope"),
+            Some(LocalCommand::Invalid(_))
+        ));
+        assert!(parse_local_command("  /stop  ").is_some());
+
+        let weather = select_tools_for_message("¿llueve en Córdoba?");
+        assert!(weather
+            .iter()
+            .any(|tool| tool.function.name == "get_weather"));
+        assert!(weather
+            .iter()
+            .any(|tool| tool.function.name == "list_tasks"));
+        let everything = select_tools_for_message("hola");
+        assert_eq!(everything.len(), tool_definitions().len());
+        let minutes = validate_args(
+            &crate::tools::registry::find_spec("start_pomodoro").unwrap(),
+            &json!({ "minutes": 0 }),
+        );
+        assert!(minutes.is_err());
+        assert!(validate_args(
+            &crate::tools::registry::find_spec("start_pomodoro").unwrap(),
+            &json!({ "minutes": 25 }),
+        )
+        .is_ok());
+    }
 }

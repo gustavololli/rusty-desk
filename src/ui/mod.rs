@@ -5582,3 +5582,19 @@ async fn execute_external_tool_async(
         _ => Err(format!("Herramienta externa desconocida: {name}")),
     }
 }
+
+#[cfg(test)]
+mod text_tests {
+    use super::{is_external_tool_name, truncate_chars};
+
+    #[test]
+    fn truncation_keeps_unicode_scalars_and_marks_external_tools() {
+        assert_eq!(truncate_chars("hola", 10), "hola");
+        assert_eq!(truncate_chars("áéíóú", 3), "áé…");
+        assert_eq!(truncate_chars("abc", 1), "…");
+        assert_eq!(truncate_chars("abc", 0), "…");
+        assert!(is_external_tool_name("web_search"));
+        assert!(is_external_tool_name("get_exchange_rate"));
+        assert!(!is_external_tool_name("add_task"));
+    }
+}

@@ -382,6 +382,21 @@ mod tests {
             Err(FreeToolError::UnsafeUrl(_))
         ));
         assert!(validate_url_syntax("https://blog.rust-lang.org/").is_ok());
+        assert!(matches!(
+            validate_url_syntax("   "),
+            Err(FreeToolError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            validate_url_syntax("notaurl"),
+            Err(FreeToolError::InvalidRequest(_))
+        ));
+        assert!(!is_forbidden_ip("1.1.1.1".parse().unwrap()));
+        assert!(is_forbidden_ip("100.64.0.1".parse().unwrap()));
+        assert!(is_forbidden_ip("198.18.0.1".parse().unwrap()));
+        assert!(is_forbidden_ip("0.0.0.0".parse().unwrap()));
+        assert!(!is_forbidden_ip("2606:4700:4700::1111".parse().unwrap()));
+        assert!(is_forbidden_ip("fd00::1".parse().unwrap()));
+        assert_eq!(normalize_whitespace(" a \n\n b\t"), "a b");
     }
 
     #[test]

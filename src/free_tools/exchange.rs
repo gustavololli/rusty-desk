@@ -177,5 +177,13 @@ mod tests {
             parse_frankfurter_response(json, "ARS", 100.0),
             Err(FreeToolError::InvalidRequest(_))
         ));
+        assert!(matches!(
+            parse_frankfurter_response("not-json", "EUR", 1.0),
+            Err(FreeToolError::ProviderUnavailable(_))
+        ));
+        assert!(is_valid_currency_code("USD"));
+        assert!(!is_valid_currency_code("usd"));
+        assert!(!is_valid_currency_code("US"));
+        assert!(!is_valid_currency_code("USDT"));
     }
 }

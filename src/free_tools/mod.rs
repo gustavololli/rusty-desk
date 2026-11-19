@@ -954,4 +954,27 @@ mod tests {
             Err(FreeToolError::QuotaExceeded(_))
         ));
     }
+
+    #[test]
+    fn billing_period_clamps_the_reset_day() {
+        use chrono::Datelike;
+        assert_eq!(current_period_key(None), None);
+        let today = chrono::Utc::now().date_naive();
+        let this_month = format!("{:04}-{:02}", today.year(), today.month());
+        assert_eq!(
+            current_period_key(Some(1)).as_deref(),
+            Some(format!("{this_month}-d01").as_str())
+        );
+        let high = current_period_key(Some(99)).unwrap();
+        assert!(high.ends_with("-d28"), "{high}");
+        if today.day() >= 28 {
+            assert!(high.starts_with(&this_month), "{high}");
+        } else {
+            assert!(!high.starts_with(&this_month), "{high}");
+        }
+        assert_eq!(
+            current_period_key(Some(0)).unwrap().rsplit('-').next(),
+            Some("d01")
+        );
+    }
 }

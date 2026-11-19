@@ -882,4 +882,25 @@ mod tests {
             .map_err(|err| err.to_string())?;
         Ok(())
     }
+
+    #[test]
+    fn scale_and_crop_reject_bad_inputs_and_paths_follow_the_state() {
+        assert!(scale_nearest(&[1, 2, 3, 4], 2, 2, 1).is_err());
+        let sheet = DecodedImage {
+            width: 2,
+            height: 2,
+            pixels: vec![0; 16],
+        };
+        assert!(crop_frame(&sheet, 2, 1, 0).is_err());
+        assert_eq!(fit_integer_scale(f32::NAN, 96.0), 0.0);
+        assert_eq!(fit_integer_scale(96.0, -1.0), 0.0);
+        assert_eq!(display_side(-4.0, 96.0), -4.0);
+        assert_eq!(
+            frame_path(AnimationState::ListeningMusic, 3),
+            "frames/listening_music/03.png"
+        );
+        assert_eq!(state_row(AnimationState::Glitch), 11);
+        let [u0, _, u1, _] = frame_uv(0, 0, 0, 0, 0);
+        assert!(u0.is_finite() && u1.is_finite());
+    }
 }
