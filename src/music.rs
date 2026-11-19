@@ -1,7 +1,32 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+
+/// Windows cannot SIGSTOP `ffplay`. Pause/resume are unavailable there; stop still works.
+pub fn music_pause_supported() -> bool {
+    !cfg!(windows)
+}
+
+/// True when a local playback binary Rusty already knows how to spawn is on `PATH`.
+/// Checks the filesystem only; it does not start a player.
+pub fn playback_backend_available() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let path_var = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path_var).any(|dir| {
+            [
+                "ffplay",
+                "ffplay.exe",
+                "gst-play-1.0",
+                "mpg123",
+                "mpg123.exe",
+            ]
+            .iter()
+            .any(|bin| dir.join(bin).is_file())
+        })
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M3uTrack {

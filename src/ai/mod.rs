@@ -88,18 +88,269 @@ pub struct ToolFunctionDef {
     pub parameters: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeToolSupport {
+    /// The API accepts official tool schemas (Gemini `functionDeclarations` or OpenAI `tools`).
+    Supported,
+    /// An OpenAI-compatible server might accept `tools` (Ollama, llama.cpp, LM Studio). Try once.
+    Probe,
+    /// Never send tools. Never parse assistant text into tool calls.
+    Unsupported,
+}
+
 #[derive(Debug, Clone)]
 pub struct AiResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub raw_gemini_parts: Option<Vec<Value>>,
+    /// The endpoint rejected a native tool payload. The text, if any, was not parsed into calls.
+    pub tools_rejected: bool,
+}
+
+impl AiResponse {
+    pub fn from_parts(
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        raw_gemini_parts: Option<Vec<Value>>,
+    ) -> Self {
+        Self {
+            content,
+            tool_calls,
+            raw_gemini_parts,
+            tools_rejected: false,
+        }
+    }
 }
 
 #[async_trait]
 pub trait AiProvider: Send + Sync {
+    fn native_tool_support(&self) -> NativeToolSupport {
+        NativeToolSupport::Probe
+    }
+
     async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef])
         -> anyhow::Result<AiResponse>;
+
     async fn transcribe(&self, wav_bytes: Vec<u8>) -> anyhow::Result<String>;
+}
+
+/// How a turn should present tools to the provider. `Off` and `Unsupported` send no schemas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDispatch {
+    Native,
+    Unavailable,
+}
+
+pub fn resolve_tool_dispatch(mode_off: bool, support: NativeToolSupport) -> ToolDispatch {
+    if mode_off || support == NativeToolSupport::Unsupported {
+        ToolDispatch::Unavailable
+    } else {
+        ToolDispatch::Native
+    }
+}
+
+pub fn build_openai_chat_request(
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[ToolDef],
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+    });
+    if !tools.is_empty() {
+        body["tools"] = serde_json::to_value(tools).unwrap_or_else(|_| json!([]));
+        body["tool_choice"] = json!("auto");
+    }
+    body
+}
+
+pub fn parse_openai_chat_response(text: &str) -> anyhow::Result<AiResponse> {
+    let parsed: ApiChatResponse = serde_json::from_str(text)
+        .map_err(|e| anyhow::anyhow!("Respuesta JSON inválida: {e} — {text}"))?;
+    let first = parsed
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("La API no devolvió choices"))?;
+    Ok(AiResponse::from_parts(
+        first.message.content,
+        first.message.tool_calls.unwrap_or_default(),
+        None,
+    ))
+}
+
+pub fn build_gemini_request(messages: &[ChatMessage], tools: &[ToolDef]) -> Value {
+    let system_text: String = messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .filter_map(|m| m.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut contents = Vec::new();
+    for msg in messages.iter().filter(|m| m.role != "system") {
+        match msg.role.as_str() {
+            "user" => {
+                if let Some(text) = &msg.content {
+                    contents.push(json!({
+                        "role": "user",
+                        "parts": [{ "text": text }]
+                    }));
+                }
+            }
+            "assistant" => {
+                if let Some(raw_parts) = &msg.raw_gemini_parts {
+                    contents.push(json!({ "role": "model", "parts": raw_parts }));
+                } else {
+                    let mut parts = Vec::new();
+                    if let Some(text) = &msg.content {
+                        if !text.is_empty() {
+                            parts.push(json!({ "text": text }));
+                        }
+                    }
+                    if let Some(tcs) = &msg.tool_calls {
+                        for tc in tcs {
+                            let args_val: Value =
+                                serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+                            let mut part_obj = json!({
+                                "functionCall": {
+                                    "name": tc.function.name,
+                                    "args": args_val
+                                }
+                            });
+                            if let Some(sig) = &tc.thought_signature {
+                                part_obj["thoughtSignature"] = json!(sig);
+                            }
+                            parts.push(part_obj);
+                        }
+                    }
+                    if !parts.is_empty() {
+                        contents.push(json!({ "role": "model", "parts": parts }));
+                    }
+                }
+            }
+            "tool" => {
+                let call_id = msg.tool_call_id.as_deref().unwrap_or("");
+                let fn_name = messages
+                    .iter()
+                    .filter_map(|m| m.tool_calls.as_ref())
+                    .flatten()
+                    .find(|tc| tc.id == call_id)
+                    .map(|tc| tc.function.name.as_str())
+                    .unwrap_or("tool");
+                let result_str = msg.content.as_deref().unwrap_or("");
+                let mut response_part = json!({
+                    "functionResponse": {
+                        "name": fn_name,
+                        "response": { "result": result_str }
+                    }
+                });
+                // Echo an id only when the API actually issued one. Synthetic ids stay local.
+                if !call_id.is_empty() && !call_id.starts_with("gemini_") {
+                    response_part["functionResponse"]["id"] = json!(call_id);
+                }
+                contents.push(json!({
+                    "role": "user",
+                    "parts": [response_part]
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    let mut body = json!({ "contents": contents });
+    if !system_text.is_empty() {
+        body["systemInstruction"] = json!({ "parts": [{ "text": system_text }] });
+    }
+    if !tools.is_empty() {
+        let decls: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.function.name,
+                    "description": t.function.description,
+                    "parameters": t.function.parameters
+                })
+            })
+            .collect();
+        body["tools"] = json!([{ "functionDeclarations": decls }]);
+    }
+    body
+}
+
+pub fn parse_gemini_response(text: &str) -> anyhow::Result<AiResponse> {
+    let parsed: GeminiResponse = serde_json::from_str(text)
+        .map_err(|e| anyhow::anyhow!("Respuesta JSON inválida de Gemini: {e} — {text}"))?;
+    let raw_parts = parsed
+        .candidates
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .and_then(|c| c.content)
+        .and_then(|c| c.parts)
+        .unwrap_or_default();
+
+    let mut text_out = Vec::new();
+    let mut tool_calls = Vec::new();
+    for (idx, part) in raw_parts.iter().enumerate() {
+        if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+            if !t.is_empty()
+                && !part
+                    .get("thought")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            {
+                text_out.push(t.to_string());
+            }
+        }
+        if let Some(fc) = part.get("functionCall") {
+            let name = fc
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args_str = fc
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| json!({}))
+                .to_string();
+            let sig = part
+                .get("thoughtSignature")
+                .or_else(|| part.get("thought_signature"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let id = fc
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("gemini_{name}_{idx}"));
+            tool_calls.push(ToolCall {
+                id,
+                kind: "function".to_string(),
+                function: ToolFunctionCall {
+                    name,
+                    arguments: args_str,
+                },
+                thought_signature: sig,
+            });
+        }
+    }
+
+    Ok(AiResponse::from_parts(
+        if text_out.is_empty() {
+            None
+        } else {
+            Some(text_out.join("\n"))
+        },
+        tool_calls,
+        if raw_parts.is_empty() {
+            None
+        } else {
+            Some(raw_parts)
+        },
+    ))
 }
 
 /// Generic OpenAI-compatible HTTP client (works with OpenAI, Groq, OpenRouter, Ollama, LM Studio, etc.).
@@ -161,21 +412,27 @@ struct ApiTranscribeResponse {
 
 #[async_trait]
 impl AiProvider for OpenAiCompatibleProvider {
+    fn native_tool_support(&self) -> NativeToolSupport {
+        let url = self.base_url.to_ascii_lowercase();
+        if url.contains("api.openai.com")
+            || url.contains("openrouter.ai")
+            || url.contains("api.groq.com")
+        {
+            NativeToolSupport::Supported
+        } else {
+            // Ollama and llama.cpp speak this shape only when the loaded model/template
+            // actually supports tools. `tool_choice` is not universal. Probe and say so.
+            NativeToolSupport::Probe
+        }
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDef],
     ) -> anyhow::Result<AiResponse> {
         let url = format!("{}/chat/completions", self.base_url);
-        let mut body = json!({
-            "model": self.model,
-            "messages": messages,
-        });
-
-        if !tools.is_empty() {
-            body["tools"] = serde_json::to_value(tools)?;
-            body["tool_choice"] = json!("auto");
-        }
+        let body = build_openai_chat_request(&self.model, messages, tools);
 
         let mut req = self.client.post(&url).json(&body);
         if !self.api_key.trim().is_empty() {
@@ -207,18 +464,12 @@ impl AiProvider for OpenAiCompatibleProvider {
                 if !retry_status.is_success() {
                     anyhow::bail!("Error de API ({retry_status}): {retry_text}");
                 }
-                let parsed: ApiChatResponse = serde_json::from_str(&retry_text)
-                    .map_err(|e| anyhow::anyhow!("Respuesta JSON inválida: {e} — {retry_text}"))?;
-                let first = parsed
-                    .choices
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("La API no devolvió choices"))?;
-                return Ok(AiResponse {
-                    content: first.message.content,
-                    tool_calls: first.message.tool_calls.unwrap_or_default(),
-                    raw_gemini_parts: None,
-                });
+                let mut parsed = parse_openai_chat_response(&retry_text)?;
+                // The endpoint refused native tools. Keep the plain text and do not
+                // scrape it for fake function calls.
+                parsed.tools_rejected = true;
+                parsed.tool_calls.clear();
+                return Ok(parsed);
             }
         }
 
@@ -226,20 +477,7 @@ impl AiProvider for OpenAiCompatibleProvider {
             anyhow::bail!("Error de API ({status}): {text}");
         }
 
-        let parsed: ApiChatResponse = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Respuesta JSON inválida: {e} — {text}"))?;
-
-        let first = parsed
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("La API no devolvió choices"))?;
-
-        Ok(AiResponse {
-            content: first.message.content,
-            tool_calls: first.message.tool_calls.unwrap_or_default(),
-            raw_gemini_parts: None,
-        })
+        parse_openai_chat_response(&text)
     }
 
     async fn transcribe(&self, wav_bytes: Vec<u8>) -> anyhow::Result<String> {
@@ -274,6 +512,10 @@ pub struct MockProvider;
 
 #[async_trait]
 impl AiProvider for MockProvider {
+    fn native_tool_support(&self) -> NativeToolSupport {
+        NativeToolSupport::Supported
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],
@@ -289,11 +531,11 @@ impl AiProvider for MockProvider {
                     .filter_map(|m| m.content.as_deref())
                     .collect();
                 let summary = results.into_iter().rev().collect::<Vec<_>>().join(" | ");
-                return Ok(AiResponse {
-                    content: Some(format!("Listo (Modo Local): {summary}")),
-                    tool_calls: vec![],
-                    raw_gemini_parts: None,
-                });
+                return Ok(AiResponse::from_parts(
+                    Some(format!("Listo (Modo Local): {summary}")),
+                    vec![],
+                    None,
+                ));
             }
         }
 
@@ -371,28 +613,55 @@ impl AiProvider for MockProvider {
             }
         }
 
-        if !calls.is_empty() {
-            return Ok(AiResponse {
-                content: None,
-                tool_calls: calls,
-                raw_gemini_parts: None,
-            });
+        if lower.contains("volumen") || lower.contains("volume") {
+            let percent = lower
+                .split(|c: char| !c.is_ascii_digit())
+                .find_map(|s| s.parse::<u64>().ok())
+                .filter(|n| *n <= 100)
+                .unwrap_or(20);
+            calls.push(make_mock_call(
+                "music_set_volume",
+                json!({ "percent": percent }),
+                calls.len(),
+            ));
+        }
+        if lower.contains("música")
+            || lower.contains("musica")
+            || lower.contains("estación")
+            || lower.contains("estacion")
+            || lower.contains("playlist")
+        {
+            let query = user_text
+                .split(':')
+                .nth(1)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let args = match query {
+                Some(q) => json!({ "query": q }),
+                None => json!({}),
+            };
+            calls.push(make_mock_call("music_play", args, calls.len()));
         }
 
-        Ok(AiResponse {
-            content: Some(
+        if !calls.is_empty() {
+            return Ok(AiResponse::from_parts(None, calls, None));
+        }
+
+        Ok(AiResponse::from_parts(
+            Some(
                 "Estoy en **Modo Local** (sin API key configurada).\n\n\
                 Podés probar comandos como:\n\
                 - *\"Anota una tarea: comprar café\"*\n\
                 - *\"Tomé un vaso de agua\"*\n\
                 - *\"Inicia un pomodoro\"*\n\
+                - *\"Poné música y bajá el volumen al 20%\"*\n\
                 - *\"Ordena mi escritorio\"*\n\n\
-                Cuando elijas tu API (OpenAI, Groq, Ollama, etc.), configurala en la pestaña **⚙ Config API**."
+                Cuando elijas tu API (Gemini, OpenAI, Ollama, etc.), configurala en la pestaña **⚙ Config API**."
                     .to_string(),
             ),
-            tool_calls: vec![],
-            raw_gemini_parts: None,
-        })
+            vec![],
+            None,
+        ))
     }
 
     async fn transcribe(&self, _wav_bytes: Vec<u8>) -> anyhow::Result<String> {
@@ -442,101 +711,16 @@ struct GeminiContent {
 
 #[async_trait]
 impl AiProvider for GoogleGeminiProvider {
+    fn native_tool_support(&self) -> NativeToolSupport {
+        NativeToolSupport::Supported
+    }
+
     async fn chat(
         &self,
         messages: &[ChatMessage],
         tools: &[ToolDef],
     ) -> anyhow::Result<AiResponse> {
-        let system_text: String = messages
-            .iter()
-            .filter(|m| m.role == "system")
-            .filter_map(|m| m.content.as_deref())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let mut contents = Vec::new();
-        for msg in messages.iter().filter(|m| m.role != "system") {
-            match msg.role.as_str() {
-                "user" => {
-                    if let Some(text) = &msg.content {
-                        contents.push(json!({
-                            "role": "user",
-                            "parts": [{ "text": text }]
-                        }));
-                    }
-                }
-                "assistant" => {
-                    if let Some(raw_parts) = &msg.raw_gemini_parts {
-                        contents.push(json!({ "role": "model", "parts": raw_parts }));
-                    } else {
-                        let mut parts = Vec::new();
-                        if let Some(text) = &msg.content {
-                            if !text.is_empty() {
-                                parts.push(json!({ "text": text }));
-                            }
-                        }
-                        if let Some(tcs) = &msg.tool_calls {
-                            for tc in tcs {
-                                let args_val: Value = serde_json::from_str(&tc.function.arguments)
-                                    .unwrap_or(json!({}));
-                                let mut part_obj = json!({
-                                    "functionCall": {
-                                        "name": tc.function.name,
-                                        "args": args_val
-                                    }
-                                });
-                                if let Some(sig) = &tc.thought_signature {
-                                    part_obj["thoughtSignature"] = json!(sig);
-                                }
-                                parts.push(part_obj);
-                            }
-                        }
-                        if !parts.is_empty() {
-                            contents.push(json!({ "role": "model", "parts": parts }));
-                        }
-                    }
-                }
-                "tool" => {
-                    let call_id = msg.tool_call_id.as_deref().unwrap_or("");
-                    let fn_name = messages
-                        .iter()
-                        .filter_map(|m| m.tool_calls.as_ref())
-                        .flatten()
-                        .find(|tc| tc.id == call_id)
-                        .map(|tc| tc.function.name.as_str())
-                        .unwrap_or("tool");
-                    let result_str = msg.content.as_deref().unwrap_or("");
-                    contents.push(json!({
-                        "role": "user",
-                        "parts": [{
-                            "functionResponse": {
-                                "name": fn_name,
-                                "response": { "result": result_str }
-                            }
-                        }]
-                    }));
-                }
-                _ => {}
-            }
-        }
-
-        let mut body = json!({ "contents": contents });
-        if !system_text.is_empty() {
-            body["systemInstruction"] = json!({ "parts": [{ "text": system_text }] });
-        }
-        if !tools.is_empty() {
-            let decls: Vec<Value> = tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "name": t.function.name,
-                        "description": t.function.description,
-                        "parameters": t.function.parameters
-                    })
-                })
-                .collect();
-            body["tools"] = json!([{ "functionDeclarations": decls }]);
-        }
+        let body = build_gemini_request(messages, tools);
 
         let mut last_status = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
         let mut text = String::new();
@@ -596,72 +780,7 @@ impl AiProvider for GoogleGeminiProvider {
             anyhow::bail!("Error de Gemini ({last_status}): {text}");
         }
 
-        let parsed: GeminiResponse = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Respuesta JSON inválida de Gemini: {e} — {text}"))?;
-
-        let raw_parts = parsed
-            .candidates
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-            .and_then(|c| c.content)
-            .and_then(|c| c.parts)
-            .unwrap_or_default();
-
-        let mut text_out = Vec::new();
-        let mut tool_calls = Vec::new();
-        for (idx, part) in raw_parts.iter().enumerate() {
-            if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                if !t.is_empty()
-                    && !part
-                        .get("thought")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                {
-                    text_out.push(t.to_string());
-                }
-            }
-            if let Some(fc) = part.get("functionCall") {
-                let name = fc
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args_str = fc
-                    .get("args")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}))
-                    .to_string();
-                let sig = part
-                    .get("thoughtSignature")
-                    .or_else(|| part.get("thought_signature"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                tool_calls.push(ToolCall {
-                    id: format!("gemini_{name}_{idx}"),
-                    kind: "function".to_string(),
-                    function: ToolFunctionCall {
-                        name,
-                        arguments: args_str,
-                    },
-                    thought_signature: sig,
-                });
-            }
-        }
-
-        Ok(AiResponse {
-            content: if text_out.is_empty() {
-                None
-            } else {
-                Some(text_out.join("\n"))
-            },
-            tool_calls,
-            raw_gemini_parts: if raw_parts.is_empty() {
-                None
-            } else {
-                Some(raw_parts)
-            },
-        })
+        parse_gemini_response(&text)
     }
 
     async fn transcribe(&self, _wav_bytes: Vec<u8>) -> anyhow::Result<String> {
@@ -787,6 +906,158 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.content.as_deref(), Some("Respuesta sin tools"));
+        assert!(resp.tools_rejected);
+        assert!(resp.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn openai_and_gemini_fixtures_round_trip_parallel_tool_calls() {
+        let tools = vec![ToolDef {
+            kind: "function",
+            function: ToolFunctionDef {
+                name: "start_pomodoro",
+                description: "Inicia un Pomodoro",
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "minutes": { "type": "integer" } },
+                    "required": ["minutes"]
+                }),
+            },
+        }];
+        let call = ToolCall {
+            id: "call_abc".to_string(),
+            kind: "function".to_string(),
+            function: ToolFunctionCall {
+                name: "start_pomodoro".to_string(),
+                arguments: r#"{"minutes":25}"#.to_string(),
+            },
+            thought_signature: None,
+        };
+        let history = vec![
+            ChatMessage::user("arrancá un pomodoro"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![call.clone()]),
+                tool_call_id: None,
+                raw_gemini_parts: None,
+            },
+            ChatMessage::tool_result("call_abc", "Modo Enfoque iniciado: 25 minutos."),
+        ];
+
+        let openai = build_openai_chat_request("gpt-4o-mini", &history, &tools);
+        assert_eq!(openai["tool_choice"], "auto");
+        assert_eq!(openai["tools"][0]["type"], "function");
+        assert_eq!(openai["tools"][0]["function"]["name"], "start_pomodoro");
+        assert_eq!(openai["messages"][1]["tool_calls"][0]["id"], "call_abc");
+        assert_eq!(openai["messages"][2]["role"], "tool");
+        assert_eq!(openai["messages"][2]["tool_call_id"], "call_abc");
+
+        let parsed = parse_openai_chat_response(
+            r#"{"id":"chatcmpl_1","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"music_set_volume","arguments":"{\"percent\":20}"}},{"id":"call_2","type":"function","function":{"name":"add_task","arguments":"{\"title\":\"comprar café\"}"}}]}}]}"#,
+        )
+        .unwrap();
+        assert!(!parsed.tools_rejected);
+        assert_eq!(parsed.tool_calls.len(), 2);
+        assert_eq!(parsed.tool_calls[0].function.name, "music_set_volume");
+        assert_eq!(parsed.tool_calls[1].id, "call_2");
+        assert!(parsed.tool_calls[1]
+            .function
+            .arguments
+            .contains("comprar café"));
+
+        let gemini_call = ToolCall {
+            id: "fc_official".to_string(),
+            kind: "function".to_string(),
+            function: ToolFunctionCall {
+                name: "start_pomodoro".to_string(),
+                arguments: r#"{"minutes":25}"#.to_string(),
+            },
+            thought_signature: Some("sig-abc".to_string()),
+        };
+        let gemini_history = vec![
+            ChatMessage::system("Sos Rusty"),
+            ChatMessage::user("pomodoro"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![gemini_call]),
+                tool_call_id: None,
+                raw_gemini_parts: None,
+            },
+            ChatMessage::tool_result("fc_official", "iniciado"),
+        ];
+        let gemini = build_gemini_request(&gemini_history, &tools);
+        assert_eq!(
+            gemini["tools"][0]["functionDeclarations"][0]["name"],
+            "start_pomodoro"
+        );
+        assert_eq!(gemini["systemInstruction"]["parts"][0]["text"], "Sos Rusty");
+        assert_eq!(
+            gemini["contents"][1]["parts"][0]["functionCall"]["name"],
+            "start_pomodoro"
+        );
+        assert_eq!(
+            gemini["contents"][1]["parts"][0]["thoughtSignature"],
+            "sig-abc"
+        );
+        assert_eq!(
+            gemini["contents"][2]["parts"][0]["functionResponse"]["name"],
+            "start_pomodoro"
+        );
+        assert_eq!(
+            gemini["contents"][2]["parts"][0]["functionResponse"]["id"],
+            "fc_official"
+        );
+        assert_eq!(
+            gemini["contents"][2]["parts"][0]["functionResponse"]["response"]["result"],
+            "iniciado"
+        );
+
+        let gemini_parsed = parse_gemini_response(
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"music_play","args":{},"id":"fc_1"}},{"functionCall":{"name":"start_pomodoro","args":{"minutes":25},"id":"fc_2"},"thoughtSignature":"sig-2"}]}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(gemini_parsed.tool_calls.len(), 2);
+        assert_eq!(gemini_parsed.tool_calls[0].id, "fc_1");
+        assert_eq!(gemini_parsed.tool_calls[1].function.name, "start_pomodoro");
+        assert_eq!(
+            gemini_parsed.tool_calls[1].thought_signature.as_deref(),
+            Some("sig-2")
+        );
+        assert!(gemini_parsed.raw_gemini_parts.is_some());
+
+        assert_eq!(
+            resolve_tool_dispatch(true, NativeToolSupport::Supported),
+            ToolDispatch::Unavailable
+        );
+        assert_eq!(
+            resolve_tool_dispatch(false, NativeToolSupport::Unsupported),
+            ToolDispatch::Unavailable
+        );
+        assert_eq!(
+            resolve_tool_dispatch(false, NativeToolSupport::Probe),
+            ToolDispatch::Native
+        );
+        assert_eq!(
+            OpenAiCompatibleProvider::new(
+                "http://127.0.0.1:11434/v1".into(),
+                String::new(),
+                "llama3.2".into(),
+                String::new(),
+            )
+            .native_tool_support(),
+            NativeToolSupport::Probe
+        );
+        assert_eq!(
+            GoogleGeminiProvider::new(
+                "https://generativelanguage.googleapis.com/v1beta".into(),
+                "k".into(),
+                "gemini-flash-latest".into(),
+            )
+            .native_tool_support(),
+            NativeToolSupport::Supported
+        );
     }
 
     #[tokio::test]

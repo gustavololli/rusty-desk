@@ -355,6 +355,32 @@ impl Default for DreamingConfig {
     }
 }
 
+/// Whether the chat provider should receive native tool schemas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ToolCallingMode {
+    /// Gemini and OpenAI send tools. OpenAI-compatible servers are probed.
+    #[default]
+    Auto,
+    /// Always send tools, including to local OpenAI-compatible servers.
+    On,
+    /// Never send tools and never pretend text is a tool call.
+    Off,
+}
+
+impl ToolCallingMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Automático",
+            Self::On => "Siempre",
+            Self::Off => "Desactivado",
+        }
+    }
+
+    pub fn is_off(self) -> bool {
+        matches!(self, Self::Off)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub assistant_name: String,
@@ -400,6 +426,8 @@ pub struct AppConfig {
     pub external_tools: ExternalToolsConfig,
     #[serde(default)]
     pub dreaming: DreamingConfig,
+    #[serde(default)]
+    pub tool_calling: ToolCallingMode,
 }
 
 fn default_true() -> bool {
@@ -453,6 +481,7 @@ impl Default for AppConfig {
             audio_muted: false,
             external_tools: ExternalToolsConfig::default(),
             dreaming: DreamingConfig::default(),
+            tool_calling: ToolCallingMode::Auto,
         }
     }
 }

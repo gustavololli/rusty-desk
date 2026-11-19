@@ -99,12 +99,38 @@ Escribí `/ayuda` dentro del chat para consultar la lista completa.
 | `/clima Córdoba` | Consulta el clima. |
 | `/buscar Rust egui` | Busca en la web, si configuraste un proveedor. |
 
+## 🛠️ Herramientas del asistente
+
+Rusty ejecuta acciones de verdad. El modelo propone llamadas; Rust valida el nombre, los parámetros, el riesgo y si la herramienta está disponible. El modelo no corre código ni puede confirmarse a sí mismo.
+
+| Riesgo | Ejemplos | Confirmación |
+| --- | --- | --- |
+| Low | Leer tareas, estado del Pomodoro, play/pausa/volumen del reproductor, clima | No |
+| Medium | Crear o editar tareas, registrar hábitos, guardar un recuerdo | No |
+| High | Borrar una tarea, mover o deshacer archivos del escritorio | Sí, en el chat |
+
+El volumen que cambia es el del reproductor de Rusty (la sesión de `ffplay` / Windows), no el volumen general del sistema ni los efectos de sonido. Pausar música no está disponible en Windows: ahí se puede detener. No se inventan playlists ni estaciones.
+
+Proveedores:
+
+| Proveedor | Tool calling |
+| --- | --- |
+| Gemini | Nativo (`functionDeclarations` / `functionCall` / `functionResponse`) |
+| OpenAI, OpenRouter, Groq | Nativo (`tools` / `tool_calls` en chat completions) |
+| Ollama, llama.cpp, LM Studio y otros compatibles | Se prueba. Si el servidor rechaza `tools`, Rusty lo dice y no interpreta el texto como una llamada |
+| Mock local | Devuelve llamadas estructuradas sin red |
+
+En Configuración se puede dejar en automático, forzar o desactivar. Un turno admite varias llamadas en paralelo y varias rondas seguidas, con un tope de 6 rondas y 75 segundos. Se puede cancelar desde el chat.
+
+La búsqueda web sigue usando el motor existente (Tavily, luego LangSearch u otro proveedor configurado). Esos resultados son datos no confiables: no cambian permisos ni instrucciones.
+
 ## 🧱 Cómo está armado
 
 ```text
 src/
 ├── ui/            # egui, isla, notch, mascota, sprites y marcos 9-slice
-├── ai/            # Proveedores de modelos
+├── ai/            # Proveedores de modelos y tool calling
+├── agent.rs       # Bucle de herramientas, límites y persona
 ├── dreaming.rs    # Procesamiento independiente de memoria
 ├── persistence/   # SQLite local
 ├── platform.rs    # Integraciones según sistema operativo

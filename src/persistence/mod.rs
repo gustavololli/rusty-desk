@@ -229,6 +229,16 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Stores one explicit memory without moving Dreaming's conversation cursor.
+    pub fn dreaming_insert_memory(&self, content: &str) -> anyhow::Result<bool> {
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO dreaming_memories (id, content, source_message_id, created_at)
+             VALUES (?1, ?2, 'explicit-user', ?3)",
+            params![Uuid::new_v4().to_string(), content, Utc::now().to_rfc3339()],
+        )?;
+        Ok(inserted > 0)
+    }
+
     pub fn dreaming_delete_memory(&self, id: &str) -> anyhow::Result<()> {
         self.conn
             .execute("DELETE FROM dreaming_memories WHERE id = ?1", [id])?;

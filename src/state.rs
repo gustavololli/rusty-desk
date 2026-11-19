@@ -952,6 +952,37 @@ impl AppData {
         )
     }
 
+    /// Saves one explicit memory when the user asked to remember something.
+    /// Does not advance Dreaming's cursor and refuses obvious secrets.
+    pub fn save_explicit_memory(&self, content: &str) -> anyhow::Result<()> {
+        let trimmed = content.trim();
+        let len = trimmed.chars().count();
+        if !(3..=400).contains(&len) {
+            anyhow::bail!("El recuerdo debe tener entre 3 y 400 caracteres.");
+        }
+        let lower = trimmed.to_lowercase();
+        const BLOCKED: &[&str] = &[
+            "password",
+            "contraseña",
+            "contrasena",
+            "api key",
+            "api_key",
+            "apikey",
+            "secret",
+            "token",
+        ];
+        if BLOCKED.iter().any(|needle| lower.contains(needle)) {
+            anyhow::bail!("No guardo contraseñas, tokens ni secretos en la memoria.");
+        }
+        let Some(db) = &self.db else {
+            anyhow::bail!("Base de datos SQLite no inicializada");
+        };
+        if !db.dreaming_insert_memory(trimmed)? {
+            anyhow::bail!("Ese recuerdo ya estaba guardado. No lo dupliqué.");
+        }
+        Ok(())
+    }
+
     pub fn log_habit_delta(&mut self, idx: usize, delta: i32) -> anyhow::Result<()> {
         let Some(h) = self.habits.get_mut(idx) else {
             anyhow::bail!("Hábito no encontrado");
