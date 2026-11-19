@@ -5,15 +5,15 @@ use std::sync::{Arc, Mutex};
 pub fn host_os_label() -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        return "Windows";
+        "Windows"
     }
     #[cfg(target_os = "linux")]
     {
-        return "Linux";
+        "Linux"
     }
     #[cfg(target_os = "macos")]
     {
-        return "macOS";
+        "macOS"
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
