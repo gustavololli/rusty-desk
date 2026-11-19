@@ -55,24 +55,38 @@ impl MonitorRect {
     }
 }
 
-/// Detects whether the current Linux desktop session is X11 or Wayland.
-pub fn detect_session_kind() -> SessionKind {
-    let xdg = std::env::var("XDG_SESSION_TYPE")
-        .unwrap_or_default()
-        .to_lowercase();
+/// Classifies a desktop session from the variables a display server exports.
+/// `XDG_SESSION_TYPE` wins. An empty value falls through to the display name.
+pub fn session_kind_from_env(
+    xdg_session_type: &str,
+    wayland_display: Option<&str>,
+    display: Option<&str>,
+) -> SessionKind {
+    let xdg = xdg_session_type.to_lowercase();
     if xdg == "wayland" {
         return SessionKind::Wayland;
     }
     if xdg == "x11" {
         return SessionKind::X11;
     }
-    if std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty()) {
+    if wayland_display.is_some_and(|v| !v.is_empty()) {
         return SessionKind::Wayland;
     }
-    if std::env::var("DISPLAY").is_ok_and(|v| !v.is_empty()) {
+    if display.is_some_and(|v| !v.is_empty()) {
         return SessionKind::X11;
     }
     SessionKind::Unknown
+}
+
+/// Detects whether the current Linux desktop session is X11 or Wayland.
+pub fn detect_session_kind() -> SessionKind {
+    let wayland = std::env::var("WAYLAND_DISPLAY").ok();
+    let display = std::env::var("DISPLAY").ok();
+    session_kind_from_env(
+        &std::env::var("XDG_SESSION_TYPE").unwrap_or_default(),
+        wayland.as_deref(),
+        display.as_deref(),
+    )
 }
 
 /// Queries the X11 root screen dimensions in physical pixels.
