@@ -100,7 +100,6 @@ fn play_wav_file(path: &Path) {
                 SND_FILENAME | SND_NODEFAULT | SND_SYNC,
             )
         };
-        return;
     }
     #[cfg(not(windows))]
     {

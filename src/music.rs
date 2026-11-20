@@ -225,10 +225,10 @@ pub fn parse_m3u_file(path: &Path) -> Result<(String, Vec<M3uTrack>), String> {
 pub fn pick_m3u_file_dialog() -> Result<Option<PathBuf>, String> {
     #[cfg(windows)]
     {
-        return Ok(rfd::FileDialog::new()
+        Ok(rfd::FileDialog::new()
             .set_title("Seleccionar playlist")
             .add_filter("Playlists", &["m3u", "m3u8"])
-            .pick_file());
+            .pick_file())
     }
     #[cfg(not(windows))]
     {
@@ -276,9 +276,11 @@ pub trait VolumeBackend: Send + Sync {
 }
 
 /// PulseAudio / PipeWire `pactl` backend that adjusts only rusty-desk's sink-input.
+#[cfg(not(windows))]
 #[derive(Debug, Default)]
 pub struct PactlVolumeBackend;
 
+#[cfg(not(windows))]
 impl VolumeBackend for PactlVolumeBackend {
     fn apply_pid_volume(&self, pid: u32, volume_pct: u8, muted: bool) -> bool {
         let Ok(out) = Command::new("pactl").args(["list", "sink-inputs"]).output() else {
@@ -422,6 +424,7 @@ pub fn parse_sink_input_ids_for_pid(text: &str, pid: u32) -> Vec<String> {
 ///
 /// Native PipeWire clients (e.g. `ffplay` via SDL's PipeWire backend) expose
 /// `application.process.id` on the client object rather than on the sink-input node.
+#[cfg(any(not(windows), test))]
 pub fn parse_client_ids_for_pid(clients_text: &str, pid: u32) -> Vec<String> {
     let exact_pid = format!("\"{pid}\"");
     parse_block_ids_matching(clients_text, "Client #", "application.process.id =", |v| {
@@ -430,6 +433,7 @@ pub fn parse_client_ids_for_pid(clients_text: &str, pid: u32) -> Vec<String> {
 }
 
 /// Parses `pactl list sink-inputs` output and returns all sink-input IDs owned by `client_ids`.
+#[cfg(any(not(windows), test))]
 pub fn parse_sink_input_ids_for_clients(
     sink_inputs_text: &str,
     client_ids: &[String],
@@ -462,7 +466,7 @@ impl Default for MusicPlayer {
     fn default() -> Self {
         #[cfg(windows)]
         {
-            return Self::with_backend(Arc::new(WindowsVolumeBackend));
+            Self::with_backend(Arc::new(WindowsVolumeBackend))
         }
         #[cfg(not(windows))]
         Self::with_backend(Arc::new(PactlVolumeBackend))
@@ -629,17 +633,12 @@ impl MusicPlayer {
     }
 
     pub fn pause(&mut self) {
-        if self.paused {
-            return;
-        }
-        #[cfg(windows)]
-        {
-            // ffplay's Linux SIGSTOP pause mechanism does not exist on Windows.
-            // Never report a paused player while audio is still running.
-            return;
-        }
+        // The player uses POSIX signals to pause playback.
         #[cfg(not(windows))]
         {
+            if self.paused {
+                return;
+            }
             if let Some(pid) = self.child.as_ref().map(Child::id) {
                 let _ = Command::new("kill")
                     .args(["-STOP", &pid.to_string()])
@@ -650,15 +649,11 @@ impl MusicPlayer {
     }
 
     pub fn resume(&mut self) {
-        if !self.paused {
-            return;
-        }
-        #[cfg(windows)]
-        {
-            return;
-        }
         #[cfg(not(windows))]
         {
+            if !self.paused {
+                return;
+            }
             if let Some(pid) = self.child.as_ref().map(Child::id) {
                 let _ = Command::new("kill")
                     .args(["-CONT", &pid.to_string()])
@@ -750,27 +745,35 @@ mod tests {
 
     #[test]
     fn parses_extm3u_metadata_relative_paths_and_streams() {
-        let m3u = "\
+        let absolute_track = if cfg!(windows) {
+            "C:/abs/path/song2.flac"
+        } else {
+            "/abs/path/song2.flac"
+        };
+        let m3u = format!(
+            "\
 #EXTM3U
 #EXTINF:185,Artist - Track One
 songs/track1.mp3
 
 #EXTINF:-1,LoFi Radio Stream
 https://example.com/live.mp3
-/abs/path/song2.flac
-";
-        let tracks = parse_m3u_content(m3u, Some(Path::new("/home/user/Music")));
+{absolute_track}
+"
+        );
+        let base = Path::new("/home/user/Music");
+        let tracks = parse_m3u_content(&m3u, Some(base));
         assert_eq!(tracks.len(), 3);
         assert_eq!(tracks[0].title, "Artist - Track One");
         assert_eq!(tracks[0].duration_secs, Some(185));
-        assert_eq!(tracks[0].uri, "/home/user/Music/songs/track1.mp3");
+        assert_eq!(Path::new(&tracks[0].uri), base.join("songs/track1.mp3"));
 
         assert_eq!(tracks[1].title, "LoFi Radio Stream");
         assert_eq!(tracks[1].duration_secs, None);
         assert_eq!(tracks[1].uri, "https://example.com/live.mp3");
 
         assert_eq!(tracks[2].title, "song2");
-        assert_eq!(tracks[2].uri, "/abs/path/song2.flac");
+        assert_eq!(Path::new(&tracks[2].uri), Path::new(absolute_track));
     }
 
     #[test]
@@ -876,10 +879,22 @@ Client #112
         let mut player = MusicPlayer::with_backend(backend.clone());
 
         // Spawn a lightweight silent sleeper process as a stand-in child PID.
-        let child = Command::new("sleep")
-            .arg("2")
+        #[cfg(windows)]
+        let mut sleeper = {
+            let mut command = Command::new("ping.exe");
+            command.args(["-n", "3", "127.0.0.1"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut sleeper = {
+            let mut command = Command::new("sleep");
+            command.arg("2");
+            command
+        };
+        let child = sleeper
+            .stdout(std::process::Stdio::null())
             .spawn()
-            .expect("sleep should spawn");
+            .expect("sleeper should spawn");
         let pid = child.id();
         player.child = Some(child);
 
@@ -900,7 +915,7 @@ Client #112
 
         // Pause / resume does not reset volume or mute.
         player.pause();
-        assert!(player.is_paused());
+        assert_eq!(player.is_paused(), music_pause_supported());
         player.resume();
         assert!(!player.is_paused());
         assert_eq!(player.volume(), 65);
@@ -955,7 +970,10 @@ Client #112
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].duration_secs, None);
         assert_eq!(tracks[0].title, "track");
-        assert_eq!(tracks[0].uri, "/music/songs/nested/track.mp3");
+        assert_eq!(
+            Path::new(&tracks[0].uri),
+            Path::new("/music").join("songs/nested/track.mp3")
+        );
         assert_eq!(tracks[1].title, "only-a-file");
         assert_eq!(
             infer_title_from_uri("https://cdn.example/a/b.mp3?x=1"),

@@ -127,7 +127,6 @@ pub fn speak_local_async(text: String) {
                 }
                 let _ = child.wait();
             }
-            return;
         }
         #[cfg(not(windows))]
         {

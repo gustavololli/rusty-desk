@@ -98,11 +98,49 @@ pub enum NativeToolSupport {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+    pub total: u64,
+}
+
+impl TokenUsage {
+    pub fn accumulate(current: &mut Option<Self>, reported: Self) {
+        let total = current.get_or_insert_with(Self::default);
+        total.input = total.input.saturating_add(reported.input);
+        total.output = total.output.saturating_add(reported.output);
+        total.total = total.total.saturating_add(reported.total);
+    }
+
+    fn from_openai(usage: &Value) -> Option<Self> {
+        Some(Self {
+            input: usage["prompt_tokens"].as_u64()?,
+            output: usage["completion_tokens"].as_u64()?,
+            total: usage["total_tokens"].as_u64()?,
+        })
+    }
+
+    fn from_gemini(usage: &Value) -> Option<Self> {
+        Some(Self {
+            input: usage["promptTokenCount"]
+                .as_u64()?
+                .saturating_add(usage["toolUsePromptTokenCount"].as_u64().unwrap_or(0)),
+            output: usage["candidatesTokenCount"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_add(usage["thoughtsTokenCount"].as_u64().unwrap_or(0)),
+            total: usage["totalTokenCount"].as_u64()?,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AiResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub raw_gemini_parts: Option<Vec<Value>>,
+    pub usage: Option<TokenUsage>,
     /// The endpoint rejected a native tool payload. The text, if any, was not parsed into calls.
     pub tools_rejected: bool,
 }
@@ -117,6 +155,7 @@ impl AiResponse {
             content,
             tool_calls,
             raw_gemini_parts,
+            usage: None,
             tools_rejected: false,
         }
     }
@@ -149,6 +188,40 @@ pub fn resolve_tool_dispatch(mode_off: bool, support: NativeToolSupport) -> Tool
     }
 }
 
+/// Keep each tool batch contiguous and in request order, including after reopening
+/// an older or interrupted conversation.
+fn ordered_tool_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut history = Vec::with_capacity(messages.len());
+    let mut remaining = messages.iter().peekable();
+    while let Some(message) = remaining.next() {
+        if message.role == "tool" {
+            continue;
+        }
+        history.push(message.clone());
+        let Some(calls) = &message.tool_calls else {
+            continue;
+        };
+        let mut results = std::collections::HashMap::new();
+        while let Some(result) = remaining.next_if(|result| result.role == "tool") {
+            if let Some(id) = &result.tool_call_id {
+                results.entry(id.as_str()).or_insert(result);
+            }
+        }
+        for call in calls {
+            let result = results
+                .get(call.id.as_str())
+                .map(|result| (*result).clone());
+            history.push(result.unwrap_or_else(|| {
+                ChatMessage::tool_result(
+                    &call.id,
+                    "La conversación se interrumpió antes de registrar un resultado para esta llamada.",
+                )
+            }));
+        }
+    }
+    history
+}
+
 pub fn build_openai_chat_request(
     model: &str,
     messages: &[ChatMessage],
@@ -156,7 +229,7 @@ pub fn build_openai_chat_request(
 ) -> Value {
     let mut body = json!({
         "model": model,
-        "messages": messages,
+        "messages": ordered_tool_history(messages),
     });
     if !tools.is_empty() {
         body["tools"] = serde_json::to_value(tools).unwrap_or_else(|_| json!([]));
@@ -173,11 +246,13 @@ pub fn parse_openai_chat_response(text: &str) -> anyhow::Result<AiResponse> {
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("La API no devolvió choices"))?;
-    Ok(AiResponse::from_parts(
+    let mut response = AiResponse::from_parts(
         first.message.content,
         first.message.tool_calls.unwrap_or_default(),
         None,
-    ))
+    );
+    response.usage = TokenUsage::from_openai(&parsed.usage);
+    Ok(response)
 }
 
 pub fn build_gemini_request(messages: &[ChatMessage], tools: &[ToolDef]) -> Value {
@@ -188,8 +263,14 @@ pub fn build_gemini_request(messages: &[ChatMessage], tools: &[ToolDef]) -> Valu
         .collect::<Vec<_>>()
         .join("\n");
 
-    let mut contents = Vec::new();
-    for msg in messages.iter().filter(|m| m.role != "system") {
+    let history = ordered_tool_history(messages);
+    let mut contents: Vec<Value> = Vec::new();
+    let mut active_calls: &[ToolCall] = &[];
+    let mut response_parts = Vec::new();
+    for msg in history.iter().filter(|m| m.role != "system") {
+        if msg.role != "tool" && !response_parts.is_empty() {
+            contents.push(json!({ "role": "user", "parts": std::mem::take(&mut response_parts) }));
+        }
         match msg.role.as_str() {
             "user" => {
                 if let Some(text) = &msg.content {
@@ -200,6 +281,7 @@ pub fn build_gemini_request(messages: &[ChatMessage], tools: &[ToolDef]) -> Valu
                 }
             }
             "assistant" => {
+                active_calls = msg.tool_calls.as_deref().unwrap_or_default();
                 if let Some(raw_parts) = &msg.raw_gemini_parts {
                     contents.push(json!({ "role": "model", "parts": raw_parts }));
                 } else {
@@ -219,6 +301,9 @@ pub fn build_gemini_request(messages: &[ChatMessage], tools: &[ToolDef]) -> Valu
                                     "args": args_val
                                 }
                             });
+                            if !tc.id.is_empty() && !tc.id.starts_with("gemini_") {
+                                part_obj["functionCall"]["id"] = json!(tc.id);
+                            }
                             if let Some(sig) = &tc.thought_signature {
                                 part_obj["thoughtSignature"] = json!(sig);
                             }
@@ -232,10 +317,8 @@ pub fn build_gemini_request(messages: &[ChatMessage], tools: &[ToolDef]) -> Valu
             }
             "tool" => {
                 let call_id = msg.tool_call_id.as_deref().unwrap_or("");
-                let fn_name = messages
+                let fn_name = active_calls
                     .iter()
-                    .filter_map(|m| m.tool_calls.as_ref())
-                    .flatten()
                     .find(|tc| tc.id == call_id)
                     .map(|tc| tc.function.name.as_str())
                     .unwrap_or("tool");
@@ -250,15 +333,15 @@ pub fn build_gemini_request(messages: &[ChatMessage], tools: &[ToolDef]) -> Valu
                 if !call_id.is_empty() && !call_id.starts_with("gemini_") {
                     response_part["functionResponse"]["id"] = json!(call_id);
                 }
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [response_part]
-                }));
+                response_parts.push(response_part);
             }
             _ => {}
         }
     }
 
+    if !response_parts.is_empty() {
+        contents.push(json!({ "role": "user", "parts": response_parts }));
+    }
     let mut body = json!({ "contents": contents });
     if !system_text.is_empty() {
         body["systemInstruction"] = json!({ "parts": [{ "text": system_text }] });
@@ -325,7 +408,7 @@ pub fn parse_gemini_response(text: &str) -> anyhow::Result<AiResponse> {
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
-                .unwrap_or_else(|| format!("gemini_{name}_{idx}"));
+                .unwrap_or_else(|| format!("gemini_{}_{idx}", uuid::Uuid::new_v4()));
             tool_calls.push(ToolCall {
                 id,
                 kind: "function".to_string(),
@@ -338,7 +421,7 @@ pub fn parse_gemini_response(text: &str) -> anyhow::Result<AiResponse> {
         }
     }
 
-    Ok(AiResponse::from_parts(
+    let mut response = AiResponse::from_parts(
         if text_out.is_empty() {
             None
         } else {
@@ -350,7 +433,9 @@ pub fn parse_gemini_response(text: &str) -> anyhow::Result<AiResponse> {
         } else {
             Some(raw_parts)
         },
-    ))
+    );
+    response.usage = TokenUsage::from_gemini(&parsed.usage_metadata);
+    Ok(response)
 }
 
 /// Generic OpenAI-compatible HTTP client (works with OpenAI, Groq, OpenRouter, Ollama, LM Studio, etc.).
@@ -392,6 +477,8 @@ impl OpenAiCompatibleProvider {
 #[derive(Deserialize)]
 struct ApiChatResponse {
     choices: Vec<ApiChoice>,
+    #[serde(default)]
+    usage: Value,
 }
 
 #[derive(Deserialize)]
@@ -452,7 +539,7 @@ impl AiProvider for OpenAiCompatibleProvider {
             if lower.contains("tool") || lower.contains("function") {
                 let fallback_body = json!({
                     "model": self.model,
-                    "messages": messages,
+                    "messages": ordered_tool_history(messages),
                 });
                 let mut retry_req = self.client.post(&url).json(&fallback_body);
                 if !self.api_key.trim().is_empty() {
@@ -697,6 +784,8 @@ impl GoogleGeminiProvider {
 #[derive(Deserialize)]
 struct GeminiResponse {
     candidates: Option<Vec<GeminiCandidate>>,
+    #[serde(default, rename = "usageMetadata")]
+    usage_metadata: Value,
 }
 
 #[derive(Deserialize)]
@@ -908,6 +997,42 @@ mod tests {
         assert_eq!(resp.content.as_deref(), Some("Respuesta sin tools"));
         assert!(resp.tools_rejected);
         assert!(resp.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn chat_parsers_read_optional_token_usage() {
+        let openai = parse_openai_chat_response(
+            r#"{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}"#,
+        ).unwrap();
+        let gemini = parse_gemini_response(
+            r#"{"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":3,"toolUsePromptTokenCount":5,"candidatesTokenCount":7,"thoughtsTokenCount":8,"totalTokenCount":30}}"#,
+        ).unwrap();
+        let unreported = parse_gemini_response("{}").unwrap();
+        assert_eq!(
+            openai.usage,
+            Some(TokenUsage {
+                input: 10,
+                output: 20,
+                total: 30
+            })
+        );
+        assert_eq!(
+            gemini.usage,
+            Some(TokenUsage {
+                input: 15,
+                output: 15,
+                total: 30
+            })
+        );
+        assert_eq!(unreported.usage, None);
+    }
+
+    #[test]
+    fn gemini_calls_without_provider_ids_have_distinct_local_ids() {
+        let body = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_tasks","args":{}}}]}}]}"#;
+        let first = parse_gemini_response(body).unwrap();
+        let second = parse_gemini_response(body).unwrap();
+        assert_ne!(first.tool_calls[0].id, second.tool_calls[0].id);
     }
 
     #[test]

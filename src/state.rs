@@ -1100,11 +1100,12 @@ impl AppData {
         &self,
         conversation_id: &str,
         tool_call_id: &str,
+        include_pending: bool,
     ) -> anyhow::Result<bool> {
         let Some(db) = &self.db else {
             return Ok(false);
         };
-        db.has_tool_execution(conversation_id, tool_call_id)
+        db.has_tool_execution(conversation_id, tool_call_id, include_pending)
     }
 
     pub fn record_tool_execution(&self, exec: &NewToolExecution) -> anyhow::Result<()> {

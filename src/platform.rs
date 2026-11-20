@@ -93,7 +93,7 @@ pub fn detect_session_kind() -> SessionKind {
 pub fn query_x11_virtual_bounds() -> Option<(f32, f32, f32, f32)> {
     #[cfg(not(target_os = "linux"))]
     {
-        return None;
+        None
     }
     #[cfg(target_os = "linux")]
     {
@@ -248,7 +248,6 @@ pub fn apply_platform_always_on_top(enabled: bool) {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = enabled;
-        return;
     }
     #[cfg(target_os = "linux")]
     {
@@ -307,6 +306,7 @@ pub fn apply_platform_always_on_top(enabled: bool) {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub fn merge_kwin_rules_list(existing: &str, rule_id: &str) -> String {
     let mut items: Vec<String> = existing
         .split(',')

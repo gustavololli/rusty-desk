@@ -148,7 +148,7 @@ fn extract_pdf_with_pdftotext(path: &Path) -> Result<String, String> {
     #[cfg(windows)]
     {
         let _ = path;
-        return Err("No se pudo extraer el PDF con MarkItDown. El fallback 'pdftotext' todavía no está disponible en Windows.".to_string());
+        Err("No se pudo extraer el PDF con MarkItDown. El fallback 'pdftotext' todavía no está disponible en Windows.".to_string())
     }
     #[cfg(not(windows))]
     {
@@ -216,10 +216,10 @@ pub fn save_markdown_beside(source_path: &Path, markdown: &str) -> Result<PathBu
 pub fn pick_files_dialog() -> Result<Vec<PathBuf>, String> {
     #[cfg(windows)]
     {
-        return Ok(rfd::FileDialog::new()
+        Ok(rfd::FileDialog::new()
             .set_title("Seleccionar archivos para Rusty")
             .pick_files()
-            .unwrap_or_default());
+            .unwrap_or_default())
     }
 
     #[cfg(not(windows))]

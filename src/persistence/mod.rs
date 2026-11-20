@@ -805,11 +805,14 @@ impl Database {
         &self,
         conversation_id: &str,
         tool_call_id: &str,
+        include_pending: bool,
     ) -> anyhow::Result<bool> {
         self.conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM tool_executions WHERE conversation_id = ?1 AND tool_call_id = ?2)",
-                params![conversation_id, tool_call_id],
+                "SELECT EXISTS(SELECT 1 FROM tool_executions
+                    WHERE conversation_id = ?1 AND tool_call_id = ?2
+                    AND (?3 OR status <> 'pending_confirmation'))",
+                params![conversation_id, tool_call_id, include_pending],
                 |row| row.get(0),
             )
             .map_err(Into::into)
@@ -818,8 +821,20 @@ impl Database {
     pub fn record_tool_execution(&self, exec: &NewToolExecution) -> anyhow::Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "INSERT OR IGNORE INTO tool_executions (id, conversation_id, message_id, tool_call_id, tool_name, source, arguments_json, status, result_summary, result_full, error_message, created_at, updated_at, version, dirty)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, 1, 1)",
+            "INSERT INTO tool_executions (id, conversation_id, message_id, tool_call_id, tool_name, source, arguments_json, status, result_summary, result_full, error_message, created_at, updated_at, version, dirty)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, 1, 1)
+             ON CONFLICT (conversation_id, tool_call_id)
+                WHERE conversation_id IS NOT NULL AND tool_call_id IS NOT NULL
+             DO UPDATE SET status = excluded.status,
+                arguments_json = excluded.arguments_json,
+                result_summary = excluded.result_summary,
+                result_full = excluded.result_full,
+                error_message = excluded.error_message,
+                updated_at = excluded.updated_at,
+                version = tool_executions.version + 1,
+                dirty = 1
+             WHERE tool_executions.status = 'pending_confirmation'
+                AND excluded.status <> 'pending_confirmation'",
             params![
                 exec.id,
                 exec.conversation_id,

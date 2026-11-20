@@ -20,10 +20,6 @@ pub fn tool_definitions() -> Vec<ToolDef> {
     registry::specs_to_tool_defs(&registry::all_tool_specs())
 }
 
-pub fn available_tool_definitions(ctx: &ToolContext) -> Vec<ToolDef> {
-    registry::specs_to_tool_defs(&registry::available_specs(ctx))
-}
-
 /// Validates name, arguments and availability without executing.
 /// External tools (search, fetch, exchange) stop here and run on the async engine.
 pub fn preflight(
@@ -72,6 +68,7 @@ pub struct ToolRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingConfirmation {
     pub token: String,
+    pub source: ExecutionSource,
     pub tool_name: String,
     pub args: Value,
     pub summary: String,
@@ -151,7 +148,9 @@ impl ToolEngine {
     ) -> ToolOutput {
         // 1. Deduplication guard for resumed/retried AI tool calls
         if let (Some(conv_id), Some(call_id)) = (&req.conversation_id, &req.tool_call_id) {
-            if let Ok(true) = data.has_tool_execution(conv_id, call_id) {
+            if let Ok(true) =
+                data.has_tool_execution(conv_id, call_id, req.approved_confirmation_token.is_none())
+            {
                 let msg = format!(
                     "La herramienta '{}' (id: {}) ya fue ejecutada previamente; no se repite.",
                     req.tool_name, call_id
@@ -202,7 +201,7 @@ impl ToolEngine {
 
         // 5. Authorization policy (cannot be bypassed by AI, including a forged token)
         let bound_args = if spec.requires_confirmation && req.source != ExecutionSource::Ui {
-            match bind_confirmation_args(data, &req.tool_name, &req.args) {
+            match bind_confirmation_args(data, config, organizer, &req.tool_name, &req.args) {
                 Ok(args) => args,
                 Err(err_msg) => {
                     Self::audit(data, &req, "error", None, None, Some(&err_msg));
@@ -241,6 +240,7 @@ impl ToolEngine {
                 };
                 let pending = PendingConfirmation {
                     token: expected_token,
+                    source: req.source,
                     tool_name: req.tool_name.clone(),
                     args: bound_args.clone(),
                     summary: summary.clone(),
@@ -304,6 +304,25 @@ impl ToolEngine {
                 }
             }
         }
+    }
+
+    pub fn audit_outcome(data: &AppData, req: &ToolRequest, out: &ToolOutput) {
+        if out.status == ToolStatus::Success {
+            Self::audit(
+                data,
+                req,
+                "success",
+                Some(&out.llm_message),
+                Some(&out.ui_message),
+                None,
+            );
+        } else {
+            Self::audit(data, req, "error", None, None, Some(&out.llm_message));
+        }
+    }
+
+    pub fn audit_rejection(data: &AppData, req: &ToolRequest, message: &str) {
+        Self::audit(data, req, "cancelled", Some(message), None, None);
     }
 
     fn audit(
@@ -481,6 +500,9 @@ impl ToolEngine {
             }
             "apply_organize_desktop" => {
                 let dir = Path::new(&config.organize_target_dir);
+                if args.get("_target_dir").is_some() {
+                    organizer.preview(dir).map_err(|e| format!("Error al previsualizar: {e}"))?;
+                }
                 let n = organizer
                     .apply(dir)
                     .map_err(|e| format!("Error al organizar: {e}"))?;
@@ -757,31 +779,39 @@ fn provider_ready(cfg: &crate::config::SearchProviderConfig) -> bool {
     cfg.enabled && !cfg.api_key.trim().is_empty()
 }
 
-fn bind_confirmation_args(data: &AppData, tool_name: &str, args: &Value) -> Result<Value, String> {
-    if tool_name != "delete_task" {
-        return Ok(args.clone());
-    }
+fn bind_confirmation_args(
+    data: &AppData,
+    config: &AppConfig,
+    organizer: &FileOrganizer,
+    tool_name: &str,
+    args: &Value,
+) -> Result<Value, String> {
     let mut bound = args.clone();
-    let existing_id = bound
-        .get("task_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if existing_id.is_empty() {
-        let task = resolve_one_open_task(data, bound["query"].as_str().unwrap_or(""))?;
-        bound["task_id"] = serde_json::json!(task.id);
-        bound["title"] = serde_json::json!(task.title);
-    } else if bound
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .is_empty()
-    {
-        if let Some(task) = data.tasks.iter().find(|t| t.id == existing_id) {
+    match tool_name {
+        "delete_task" => {
+            let task = match args["task_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                Some(id) => data
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == id)
+                    .ok_or_else(|| "No encontré la tarea indicada.".to_string())?,
+                None => resolve_one_open_task(data, args["query"].as_str().unwrap_or(""))?,
+            };
+            bound["task_id"] = serde_json::json!(task.id);
             bound["title"] = serde_json::json!(task.title);
         }
+        "apply_organize_desktop" => {
+            bound["_target_dir"] = serde_json::json!(config.organize_target_dir);
+        }
+        "undo_organize_desktop" => {
+            bound["_moves"] =
+                serde_json::json!(organizer.undo_stack.last().map(|batch| &batch.moves));
+        }
+        _ => {}
     }
     Ok(bound)
 }
