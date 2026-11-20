@@ -224,6 +224,43 @@ const MIGRATIONS: &[Migration] = &[
         INSERT OR IGNORE INTO dreaming_state(id, last_message_rowid) VALUES (1, 0);
         "#,
     },
+    Migration {
+        version: 6,
+        name: "0006_scheduled_news",
+        sql: r#"
+        CREATE TABLE scheduled_news (
+            id TEXT PRIMARY KEY,
+            request TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            next_at INTEGER NOT NULL,
+            report TEXT NOT NULL,
+            last_error TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
+        );
+        CREATE INDEX idx_scheduled_news_due ON scheduled_news(next_at);
+        "#,
+    },
+    Migration {
+        version: 7,
+        name: "0007_scheduled_news_chat",
+        sql: r#"
+        ALTER TABLE scheduled_news ADD COLUMN conversation_id TEXT REFERENCES conversations(id);
+        UPDATE scheduled_news SET conversation_id = (
+            SELECT messages.conversation_id
+            FROM messages
+            JOIN conversations ON conversations.id = messages.conversation_id
+            WHERE messages.content = scheduled_news.request AND messages.role = 'user'
+              AND messages.deleted_at IS NULL AND conversations.deleted_at IS NULL
+            ORDER BY messages.created_at DESC, messages.seq DESC
+            LIMIT 1
+        );
+        "#,
+    },
+    Migration {
+        version: 8,
+        name: "0008_scheduled_news_inbox",
+        sql: "ALTER TABLE scheduled_news ADD COLUMN unread INTEGER NOT NULL DEFAULT 0 CHECK (unread IN (0, 1));",
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> anyhow::Result<()> {

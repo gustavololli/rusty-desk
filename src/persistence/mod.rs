@@ -801,6 +801,114 @@ impl Database {
         Ok(next_seq)
     }
 
+    pub fn add_scheduled_news(
+        &self,
+        conversation_id: &str,
+        request: &str,
+        plan: &crate::scheduled_news::NewsPlan,
+        report: &str,
+    ) -> anyhow::Result<()> {
+        let next_at = Utc::now().timestamp() + i64::from(plan.interval_minutes) * 60;
+        self.conn.execute(
+            "INSERT INTO scheduled_news (id, request, plan_json, next_at, report, conversation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                Uuid::new_v4().to_string(),
+                request,
+                serde_json::to_string(plan)?,
+                next_at,
+                report,
+                conversation_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn scheduled_news(&self) -> anyhow::Result<Vec<crate::scheduled_news::ScheduledNews>> {
+        let mut statement = self.conn.prepare("SELECT id, request, plan_json, next_at, report, last_error, enabled, unread FROM scheduled_news ORDER BY next_at")?;
+        let mut rows = statement.query([])?;
+        let mut jobs = Vec::new();
+        while let Some(row) = rows.next()? {
+            let plan_json: String = row.get(2)?;
+            jobs.push(crate::scheduled_news::ScheduledNews {
+                id: row.get(0)?,
+                request: row.get(1)?,
+                plan: serde_json::from_str(&plan_json)?,
+                next_at: row.get(3)?,
+                report: row.get(4)?,
+                last_error: row.get(5)?,
+                enabled: row.get(6)?,
+                unread: row.get(7)?,
+            });
+        }
+        Ok(jobs)
+    }
+
+    pub fn claim_scheduled_news(
+        &self,
+        job: &crate::scheduled_news::ScheduledNews,
+        now: i64,
+    ) -> anyhow::Result<bool> {
+        let next_at = now + i64::from(job.plan.interval_minutes) * 60;
+        let updated = self.conn.execute(
+            "UPDATE scheduled_news SET next_at = ?1 WHERE id = ?2 AND next_at = ?3 AND next_at <= ?4 AND enabled = 1",
+            params![next_at, job.id, job.next_at, now],
+        )?;
+        Ok(updated == 1)
+    }
+
+    pub fn finish_scheduled_news(
+        &self,
+        id: &str,
+        result: Result<&str, &str>,
+    ) -> anyhow::Result<bool> {
+        let updated = match result {
+            Ok(report) => self.conn.execute(
+                "UPDATE scheduled_news SET report = ?1, last_error = NULL, unread = 1 WHERE id = ?2 AND enabled = 1",
+                params![report, id],
+            )?,
+            Err(error) => self.conn.execute(
+                "UPDATE scheduled_news SET last_error = ?1, unread = 1 WHERE id = ?2 AND enabled = 1",
+                params![error, id],
+            )?,
+        };
+        Ok(updated == 1)
+    }
+
+    pub fn mark_scheduled_news_read(&self, id: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute("UPDATE scheduled_news SET unread = 0 WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn reschedule_news(
+        &self,
+        job: &crate::scheduled_news::ScheduledNews,
+        interval_minutes: u32,
+    ) -> anyhow::Result<()> {
+        let mut plan = job.plan.clone();
+        plan.interval_minutes = interval_minutes;
+        let next_at = Utc::now().timestamp() + i64::from(interval_minutes) * 60;
+        let affected = self.conn.execute(
+            "UPDATE scheduled_news SET plan_json = ?1, next_at = ?2 WHERE id = ?3",
+            params![serde_json::to_string(&plan)?, next_at, job.id],
+        )?;
+        anyhow::ensure!(affected == 1, "El radar ya no está disponible.");
+        Ok(())
+    }
+
+    pub fn toggle_scheduled_news(
+        &self,
+        job: &crate::scheduled_news::ScheduledNews,
+    ) -> anyhow::Result<()> {
+        let next_at = Utc::now().timestamp() + i64::from(job.plan.interval_minutes) * 60;
+        self.conn.execute(
+            "UPDATE scheduled_news SET enabled = ?1, next_at = ?2 WHERE id = ?3",
+            params![!job.enabled, next_at, job.id],
+        )?;
+        Ok(())
+    }
+
     pub fn has_tool_execution(
         &self,
         conversation_id: &str,
@@ -1239,7 +1347,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 8);
         migrations::run_migrations(&mut db.conn).unwrap();
         let count: i64 = db
             .conn
@@ -1247,7 +1355,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 5);
+        assert_eq!(count, 8);
 
         db.ensure_conversation("c1", "Chat").unwrap();
         let text = NewPersistedMessage {

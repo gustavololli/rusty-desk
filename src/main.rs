@@ -8,6 +8,7 @@ mod music;
 mod organizer;
 mod persistence;
 mod platform;
+mod scheduled_news;
 mod sfx;
 mod state;
 mod tools;

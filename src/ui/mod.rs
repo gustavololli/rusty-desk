@@ -28,6 +28,7 @@ use crate::platform::{
     apply_platform_always_on_top, detect_current_monitor, detect_session_kind, host_os_label,
     query_x11_virtual_bounds, spawn_global_cursor_tracker, MonitorRect, SessionKind,
 };
+use crate::scheduled_news::{self, NewsPlan, ScheduledNews};
 use crate::sfx::{self, SfxEvent};
 use crate::state::{
     format_local_datetime_from_utc, AppData, AssistantMood, FocusStartResult, HabitItem,
@@ -125,6 +126,15 @@ enum BgEvent {
     },
     ProviderTestResult(String),
     DreamingDone(Result<usize, String>),
+    NewsPreview {
+        generation: u64,
+        request: String,
+        result: Result<(NewsPlan, String), String>,
+    },
+    NewsRun {
+        id: String,
+        result: Result<String, String>,
+    },
 }
 
 struct StatusBanner {
@@ -256,6 +266,10 @@ pub struct RustyDeskApp {
     turn_limits: TurnExternalLimits,
     provider_test_status: Option<String>,
     dreaming_busy: bool,
+    news_busy: bool,
+    show_news_inbox: bool,
+    next_news_check: Instant,
+    news_jobs: Vec<ScheduledNews>,
     agent_loop: Option<AgentLoop>,
     turn_generation: u64,
     last_dreaming_attempt: std::time::Instant,
@@ -352,6 +366,11 @@ impl RustyDeskApp {
             AssistantMood::Idle
         };
 
+        let news_jobs = data
+            .db
+            .as_ref()
+            .and_then(|db| db.scheduled_news().ok())
+            .unwrap_or_default();
         let mut app = Self {
             rt: tokio::runtime::Runtime::new().expect("No se pudo iniciar Tokio"),
             config,
@@ -428,6 +447,10 @@ impl RustyDeskApp {
             turn_limits: TurnExternalLimits::default(),
             provider_test_status: None,
             dreaming_busy: false,
+            news_busy: false,
+            show_news_inbox: false,
+            next_news_check: Instant::now(),
+            news_jobs,
             agent_loop: None,
             turn_generation: 0,
             last_dreaming_attempt: std::time::Instant::now(),
@@ -498,6 +521,22 @@ impl RustyDeskApp {
             return;
         }
 
+        let radar_context = self
+            .chat_history
+            .iter()
+            .rev()
+            .filter(|message| message.role == "user")
+            .filter_map(|message| message.content.as_deref())
+            .take(4)
+            .find(|previous| {
+                !scheduled_news::asks_to_reschedule(previous, true)
+                    || scheduled_news::asks_to_reschedule(previous, false)
+            })
+            .is_some_and(|previous| {
+                scheduled_news::asks_about_radars(previous)
+                    || scheduled_news::looks_recurring(previous)
+                    || scheduled_news::asks_to_reschedule(previous, false)
+            });
         let user_msg = ChatMessage::user(&trimmed);
         self.chat_ui.push(UiChatEntry::user(&trimmed));
         self.chat_history.push(user_msg.clone());
@@ -511,6 +550,25 @@ impl RustyDeskApp {
         sfx::play(SfxEvent::MessageSent, self.config.sfx_enabled);
 
         self.turn_limits = TurnExternalLimits::default();
+
+        if scheduled_news::asks_to_reschedule(&trimmed, radar_context) {
+            self.turn_tokens = None;
+            let reply = self.reschedule_news_from_chat(&trimmed);
+            self.record_radar_reply(reply);
+            return;
+        }
+
+        if scheduled_news::looks_recurring(&trimmed) {
+            self.preview_scheduled_news(trimmed, ctx);
+            return;
+        }
+
+        if scheduled_news::asks_about_radars(&trimmed) {
+            self.turn_tokens = None;
+            let reply = self.describe_news_radars();
+            self.record_radar_reply(reply);
+            return;
+        }
 
         // Intercept explicit `/` commands locally (0 LLM tokens!)
         if let Some(local_cmd) = parse_local_command(&trimmed) {
@@ -805,6 +863,59 @@ impl RustyDeskApp {
     fn process_bg_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.bg_rx.try_recv() {
             match event {
+                BgEvent::NewsPreview {
+                    generation,
+                    request,
+                    result,
+                } => {
+                    if generation != self.turn_generation {
+                        continue;
+                    }
+                    self.is_thinking = false;
+                    self.mood = AssistantMood::Idle;
+                    let reply = match result {
+                        Ok((plan, report)) => {
+                            let save = self
+                                .data
+                                .db
+                                .as_ref()
+                                .ok_or_else(|| anyhow::anyhow!("SQLite no está disponible."))
+                                .and_then(|db| {
+                                    db.add_scheduled_news(
+                                        &self.current_chat_id,
+                                        &request,
+                                        &plan,
+                                        &report,
+                                    )
+                                });
+                            match save {
+                                Ok(()) => {
+                                    self.refresh_news_jobs();
+                                    let interval =
+                                        scheduled_news::interval_label(plan.interval_minutes);
+                                    format!("**Prueba correcta. Radar programado cada {interval} mientras Rusty esté abierto.**\n\n{report}")
+                                }
+                                Err(error) => format!(
+                                    "La prueba funcionó, pero el radar no se guardó: {error}"
+                                ),
+                            }
+                        }
+                        Err(error) => format!("No programé el radar. {error}"),
+                    };
+                    self.chat_ui.push(UiChatEntry::assistant(&reply));
+                    let message = ChatMessage::assistant_text(reply);
+                    let saved = self.data.record_chat_message(
+                        &self.current_chat_id,
+                        None,
+                        &message,
+                        MessageKind::Text,
+                    );
+                    self.report_persistence_result(saved);
+                    self.chat_history.push(message);
+                }
+                BgEvent::NewsRun { id, result } => {
+                    self.publish_scheduled_news(&id, result.as_deref().map_err(String::as_str));
+                }
                 BgEvent::DreamingDone(result) => {
                     self.dreaming_busy = false;
                     self.show_status_banner(match result {
@@ -1366,6 +1477,234 @@ impl RustyDeskApp {
         sfx::play(SfxEvent::MessageReceived, self.config.sfx_enabled);
     }
 
+    fn publish_scheduled_news(&mut self, id: &str, result: Result<&str, &str>) {
+        self.news_busy = false;
+        let saved = self
+            .data
+            .db
+            .as_ref()
+            .map(|db| db.finish_scheduled_news(id, result));
+        match saved {
+            Some(Ok(true)) => {
+                self.refresh_news_jobs();
+                let title = self
+                    .news_jobs
+                    .iter()
+                    .find(|job| job.id == id)
+                    .map_or("Radar", ScheduledNews::title);
+                let status = if result.is_ok() {
+                    "informe nuevo"
+                } else {
+                    "no pudo actualizarse"
+                };
+                self.show_status_banner(format!("{title}: {status}. Abrí Radares en el chat."));
+            }
+            Some(Err(error)) => {
+                self.show_status_banner(format!("No pude guardar el resultado del radar: {error}"))
+            }
+            _ => {}
+        }
+    }
+
+    fn record_radar_reply(&mut self, reply: String) {
+        let message = ChatMessage::assistant_text(&reply);
+        self.chat_ui.push(UiChatEntry::assistant(&reply));
+        self.chat_history.push(message.clone());
+        let saved =
+            self.data
+                .record_chat_message(&self.current_chat_id, None, &message, MessageKind::Text);
+        self.report_persistence_result(saved);
+    }
+
+    fn reschedule_news_from_chat(&mut self, request: &str) -> String {
+        let Some((previous, interval)) = scheduled_news::reschedule_intervals(request) else {
+            return "Decime el intervalo nuevo, por ejemplo «Cambiá el radar de 15 minutos a cada tres horas».".into();
+        };
+        if !(15..=10080).contains(&interval) {
+            return "El intervalo del radar tiene que estar entre 15 minutos y 7 días.".into();
+        }
+        let Some(db) = &self.data.db else {
+            return "No pude modificar el radar porque SQLite no está disponible.".into();
+        };
+        let jobs = match db.scheduled_news() {
+            Ok(jobs) => jobs,
+            Err(error) => return format!("No pude leer tus radares: {error}"),
+        };
+        let query = request.to_lowercase();
+        let mut candidates: Vec<_> = jobs
+            .iter()
+            .filter(|job| previous.is_none_or(|minutes| job.plan.interval_minutes == minutes))
+            .collect();
+        let named: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|job| query.contains(&job.title().to_lowercase()))
+            .collect();
+        if !named.is_empty() {
+            candidates = named;
+        }
+        let job = match candidates.as_slice() {
+            [job] => *job,
+            [] => return "No encontré un radar con ese horario. Preguntame «¿Qué radares tenés?» para verlos.".into(),
+            _ => return "Hay más de un radar posible. Indicame su nombre o su intervalo actual.".into(),
+        };
+        if let Err(error) = db.reschedule_news(job, interval) {
+            return format!("No pude modificar el horario: {error}");
+        }
+        let reply = format!(
+            "**{}** ahora está configurado cada **{}**. {}",
+            job.title(),
+            scheduled_news::interval_label(interval),
+            if job.enabled {
+                "El intervalo nuevo empieza a contar desde ahora."
+            } else {
+                "El radar sigue pausado."
+            },
+        );
+        self.refresh_news_jobs();
+        reply
+    }
+
+    fn describe_news_radars(&mut self) -> String {
+        let Some(db) = &self.data.db else {
+            return "No pude consultar tus radares porque SQLite no está disponible.".into();
+        };
+        let jobs = match db.scheduled_news() {
+            Ok(jobs) => jobs,
+            Err(_) => return "No pude leer tus radares guardados.".into(),
+        };
+        if jobs.is_empty() {
+            return "Todavía no tenés radares programados. Para crear uno, decime «Cada cinco horas, traeme noticias de tecnología de Hacker News».".into();
+        }
+        let mut reply = String::from("**Tus radares programados**\n\n");
+        for job in &jobs {
+            let status = if !job.enabled {
+                "Pausado".into()
+            } else if let Some(next) = chrono::DateTime::from_timestamp(job.next_at, 0) {
+                format!(
+                    "Próxima ejecución {}",
+                    next.with_timezone(&chrono::Local).format("%d/%m %H:%M")
+                )
+            } else {
+                "Activo".into()
+            };
+            let latest = if job.last_error.is_some() {
+                " · La última corrida falló"
+            } else if job.unread {
+                " · Informe nuevo"
+            } else {
+                ""
+            };
+            reply.push_str(&format!(
+                "- {} · Cada {} · {status}{latest}\n",
+                job.title(),
+                scheduled_news::interval_label(job.plan.interval_minutes)
+            ));
+        }
+        reply
+            .push_str("\nAbrí **Radares** en este chat para ver los informes o pausar un horario.");
+        self.news_jobs = jobs;
+        reply
+    }
+
+    fn refresh_news_jobs(&mut self) {
+        if let Some(db) = &self.data.db {
+            match db.scheduled_news() {
+                Ok(jobs) => self.news_jobs = jobs,
+                Err(error) => {
+                    self.show_status_banner(format!("No pude cargar los radares: {error}"))
+                }
+            }
+        }
+    }
+
+    fn preview_scheduled_news(&mut self, request: String, ctx: &egui::Context) {
+        self.turn_generation = self.turn_generation.wrapping_add(1);
+        self.turn_tokens = None;
+        self.is_thinking = true;
+        self.mood = AssistantMood::Thinking;
+        let generation = self.turn_generation;
+        let provider = self.build_provider();
+        let engine = Arc::clone(&self.free_tools);
+        let config = self.config.external_tools.clone();
+        let tx = self.bg_tx.clone();
+        let ctx = ctx.clone();
+        self.rt.spawn(async move {
+            let preview = async {
+                let plan = scheduled_news::assess(provider.as_ref(), &request).await?;
+                let report =
+                    scheduled_news::run(provider.as_ref(), &engine, &config, &plan, &request, true)
+                        .await?;
+                Ok::<_, anyhow::Error>((plan, report))
+            };
+            let result = tokio::time::timeout(scheduled_news::RUN_TIMEOUT, preview)
+                .await
+                .map_err(|_| "La evaluación agotó el tiempo de espera.".to_string())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = tx.send(BgEvent::NewsPreview {
+                generation,
+                request,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    fn tick_scheduled_news(&mut self, ctx: &egui::Context) {
+        if self.is_thinking
+            || self.news_busy
+            || !self.news_jobs.iter().any(|job| job.enabled)
+            || Instant::now() < self.next_news_check
+        {
+            return;
+        }
+        self.next_news_check = Instant::now() + std::time::Duration::from_secs(5);
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
+        let now = chrono::Utc::now().timestamp();
+        if let Some(job) = self
+            .news_jobs
+            .iter()
+            .find(|job| job.enabled && job.next_at <= now)
+        {
+            if let Some(db) = &self.data.db {
+                match db.claim_scheduled_news(job, now) {
+                    Ok(true) => {
+                        self.news_busy = true;
+                        let id = job.id.clone();
+                        let request = job.request.clone();
+                        let plan = job.plan.clone();
+                        let engine = Arc::clone(&self.free_tools);
+                        let config = self.config.external_tools.clone();
+                        let provider = self.build_provider();
+                        let tx = self.bg_tx.clone();
+                        let ctx = ctx.clone();
+                        self.rt.spawn(async move {
+                            let run = scheduled_news::run(
+                                provider.as_ref(),
+                                &engine,
+                                &config,
+                                &plan,
+                                &request,
+                                false,
+                            );
+                            let result = tokio::time::timeout(scheduled_news::RUN_TIMEOUT, run)
+                                .await
+                                .map_err(|_| "La ejecución agotó el tiempo de espera.".to_string())
+                                .and_then(|result| result.map_err(|error| error.to_string()));
+                            let _ = tx.send(BgEvent::NewsRun { id, result });
+                            ctx.request_repaint();
+                        });
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.show_status_banner(format!("No pude iniciar el radar: {error}"))
+                    }
+                }
+            }
+            self.refresh_news_jobs();
+        }
+    }
+
     fn start_new_chat(&mut self) {
         self.invalidate_chat_turn();
         self.turn_tokens = None;
@@ -1373,6 +1712,7 @@ impl RustyDeskApp {
         self.chat_ui = vec![UiChatEntry::assistant(&self.welcome_text)];
         self.chat_history = vec![ChatMessage::system(&self.system_prompt)];
         self.show_chat_history = false;
+        self.show_news_inbox = false;
         self.is_thinking = false;
         self.mood = AssistantMood::Idle;
     }
@@ -2045,6 +2385,7 @@ impl eframe::App for RustyDeskApp {
             }
         }
         self.process_bg_events(ctx);
+        self.tick_scheduled_news(ctx);
         if let Some(banner) = &self.status_banner {
             let remaining = banner.expires_at.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -2947,6 +3288,37 @@ impl RustyDeskApp {
             .clicked()
             {
                 self.show_chat_history = !self.show_chat_history;
+                self.show_news_inbox = false;
+            }
+
+            let unread = self.news_jobs.iter().filter(|job| job.unread).count();
+            let radar_label = if unread == 0 {
+                "Radares".into()
+            } else {
+                format!("Radares ({unread})")
+            };
+            let fill = if self.show_news_inbox || unread > 0 {
+                accent
+            } else {
+                retro::PANEL
+            };
+            let text = if self.show_news_inbox || unread > 0 {
+                retro::NIGHT
+            } else {
+                Color32::WHITE
+            };
+            if pixel_button(
+                ui,
+                PixelIcon::Tasks,
+                &radar_label,
+                fill,
+                text,
+                "Ver informes y horarios",
+            )
+            .clicked()
+            {
+                self.show_news_inbox = !self.show_news_inbox;
+                self.show_chat_history = false;
             }
 
             for (label, cmd) in [
@@ -2963,6 +3335,15 @@ impl RustyDeskApp {
             }
         });
         ui.add_space(6.0);
+
+        if self.show_news_inbox {
+            egui::ScrollArea::vertical()
+                .id_salt("chat_news_inbox")
+                .show(ui, |ui| {
+                    self.render_scheduled_news(ui);
+                });
+            return;
+        }
 
         if let Some(pending) = self
             .pending_confirmations
@@ -3173,11 +3554,25 @@ impl RustyDeskApp {
                                         &entry.text,
                                     );
                                 }
-                                ui.label(
-                                    RichText::new(&entry.timestamp)
-                                        .size(10.0)
-                                        .color(Color32::from_gray(150)),
-                                );
+                                let timestamp = RichText::new(&entry.timestamp)
+                                    .size(10.0)
+                                    .color(Color32::from_gray(150));
+                                if entry.is_user {
+                                    ui.label(timestamp);
+                                } else {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(timestamp);
+                                        if ui
+                                            .small_button("Copiar")
+                                            .on_hover_text(
+                                                "Copiar la respuesta completa en Markdown",
+                                            )
+                                            .clicked()
+                                        {
+                                            ctx.copy_text(entry.text.clone());
+                                        }
+                                    });
+                                }
                             });
                     });
                     ui.add_space(6.0);
@@ -5280,6 +5675,128 @@ impl RustyDeskApp {
             });
     }
 
+    fn render_scheduled_news(&mut self, ui: &mut egui::Ui) {
+        if self.news_jobs.is_empty() {
+            ui.label("Pedile a Rusty en el chat: «Cada cinco horas, traeme diez noticias de tecnología de Hacker News».");
+            return;
+        }
+        let mut toggle = None;
+        let mut mark_read = None;
+        let mut insert = None;
+        let can_insert = !self.is_thinking && self.pending_confirmations.is_empty();
+        for job in &self.news_jobs {
+            ui.push_id(&job.id, |ui| {
+                ui.label(RichText::new(job.title()).strong());
+                ui.small(format!(
+                    "Cada {}",
+                    scheduled_news::interval_label(job.plan.interval_minutes)
+                ));
+                ui.small(format!("Pedido original: {}", job.request));
+                if !job.enabled {
+                    ui.small("Pausado");
+                } else if let Some(next) = chrono::DateTime::from_timestamp(job.next_at, 0) {
+                    ui.small(format!(
+                        "Próxima ejecución {}",
+                        next.with_timezone(&chrono::Local).format("%d/%m %H:%M")
+                    ));
+                }
+                if let Some(error) = &job.last_error {
+                    ui.colored_label(retro::GOLD_LIGHT, error);
+                }
+                ui.collapsing(
+                    if job.unread {
+                        "Último informe · Nuevo"
+                    } else {
+                        "Último informe"
+                    },
+                    |ui| {
+                        CommonMarkViewer::new().show(
+                            ui,
+                            &mut self.chat_markdown_cache,
+                            &job.report,
+                        );
+                    },
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(can_insert, egui::Button::new("Pegar en el chat").small())
+                        .clicked()
+                    {
+                        insert = Some((job, false));
+                    }
+                    if ui
+                        .add_enabled(can_insert, egui::Button::new("Abrir en chat nuevo").small())
+                        .clicked()
+                    {
+                        insert = Some((job, true));
+                    }
+                    if job.unread && ui.small_button("Marcar leído").clicked() {
+                        mark_read = Some(job.id.clone());
+                    }
+                });
+                let action = if job.enabled {
+                    "Pausar horario"
+                } else {
+                    "Reanudar horario"
+                };
+                if ui
+                    .add_enabled(!self.news_busy, egui::Button::new(action).small())
+                    .clicked()
+                {
+                    toggle = Some(job);
+                }
+            });
+            ui.separator();
+        }
+        if let Some((job, new_chat)) = insert {
+            let id = job.id.clone();
+            let title = job.title().to_string();
+            let report = job.report.clone();
+            self.insert_news_report(&id, &title, &report, new_chat);
+        } else if let (Some(id), Some(db)) = (mark_read, self.data.db.as_ref()) {
+            let saved = db.mark_scheduled_news_read(&id);
+            self.report_persistence_result(saved);
+            self.refresh_news_jobs();
+        } else if let (Some(job), Some(db)) = (toggle, self.data.db.as_ref()) {
+            if let Err(error) = db.toggle_scheduled_news(job) {
+                self.show_status_banner(format!("No pude cambiar el estado del radar: {error}"));
+            }
+            self.refresh_news_jobs();
+        }
+    }
+
+    fn insert_news_report(&mut self, id: &str, title: &str, report: &str, new_chat: bool) {
+        let conversation = if new_chat {
+            Uuid::new_v4().to_string()
+        } else {
+            self.current_chat_id.clone()
+        };
+        let message = ChatMessage::assistant_text(report);
+        let saved = self.data.record_chat_message(
+            &conversation,
+            new_chat.then_some(title),
+            &message,
+            MessageKind::Text,
+        );
+        let success = saved.is_ok();
+        self.report_persistence_result(saved);
+        if !success {
+            return;
+        }
+        if new_chat {
+            self.start_new_chat();
+            self.current_chat_id = conversation;
+        }
+        self.chat_ui.push(UiChatEntry::assistant(report));
+        self.chat_history.push(message);
+        self.show_news_inbox = false;
+        if let Some(db) = &self.data.db {
+            let saved = db.mark_scheduled_news_read(id);
+            self.report_persistence_result(saved);
+        }
+        self.refresh_news_jobs();
+    }
+
     fn render_settings_tab(&mut self, ui: &mut egui::Ui, accent: Color32) {
         egui::Frame::none()
             .fill(Color32::from_rgb(20, 27, 45))
@@ -6143,6 +6660,139 @@ mod text_tests {
             FreeToolsEngine::with_database(Database::open_in_memory().unwrap()),
             Arc::new(Mutex::new(None)),
         )
+    }
+
+    #[test]
+    fn scheduled_news_only_persists_successful_preflight_and_claims_once() {
+        let ctx = egui::Context::default();
+        let mut app = in_memory_app(&ctx);
+        let request = "Cada cinco horas, traeme noticias de Hacker News";
+        let origin = app.current_chat_id.clone();
+        app.data
+            .db
+            .as_ref()
+            .unwrap()
+            .ensure_conversation(&origin, "Radar de prueba")
+            .unwrap();
+        let plan = NewsPlan {
+            interval_minutes: 300,
+            query: "tecnología".into(),
+            source: scheduled_news::NewsSource::HackerNews,
+            domain: None,
+            count: 3,
+        };
+        assert!(scheduled_news::looks_recurring(request));
+        assert!(!scheduled_news::looks_recurring(
+            "¿Qué hay hoy en Hacker News?"
+        ));
+        assert!(!scheduled_news::looks_recurring(
+            "Buscá noticias y resumí cada una."
+        ));
+
+        app.bg_tx
+            .send(BgEvent::NewsPreview {
+                generation: app.turn_generation,
+                request: request.into(),
+                result: Err("La fuente no responde.".into()),
+            })
+            .unwrap();
+        app.process_bg_events(&ctx);
+        assert!(app.news_jobs.is_empty());
+        assert!(app.chat_ui.last().unwrap().text.contains("No programé"));
+
+        app.bg_tx
+            .send(BgEvent::NewsPreview {
+                generation: app.turn_generation,
+                request: request.into(),
+                result: Ok((plan, "Informe de prueba".into())),
+            })
+            .unwrap();
+        app.process_bg_events(&ctx);
+        let db = app.data.db.as_ref().unwrap();
+        let jobs = db.scheduled_news().unwrap();
+        let job = &jobs[0];
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(job.report, "Informe de prueba");
+        assert!(scheduled_news::asks_about_radars("¿Qué radares tenés?"));
+        assert!(!scheduled_news::asks_about_radars(
+            "¿Hay radar meteorológico?"
+        ));
+        assert!(!db.claim_scheduled_news(job, job.next_at - 1).unwrap());
+        assert!(db.claim_scheduled_news(job, job.next_at).unwrap());
+        assert!(!db.claim_scheduled_news(job, job.next_at).unwrap());
+        app.start_new_chat();
+        app.bg_tx
+            .send(BgEvent::NewsRun {
+                id: job.id.clone(),
+                result: Ok("Segundo informe".into()),
+            })
+            .unwrap();
+        app.process_bg_events(&ctx);
+        assert!(!app
+            .chat_ui
+            .iter()
+            .any(|entry| entry.text.contains("Segundo informe")));
+        let db = app.data.db.as_ref().unwrap();
+        assert!(!db
+            .list_messages(&origin)
+            .unwrap()
+            .iter()
+            .any(|message| message
+                .content
+                .as_deref()
+                .is_some_and(|text| text.contains("Segundo informe"))));
+        let job = &db.scheduled_news().unwrap()[0];
+        assert!(job.unread);
+        app.insert_news_report(&job.id, job.title(), &job.report, false);
+        assert_eq!(app.chat_ui.last().unwrap().text, "Segundo informe");
+        let active_chat = app.current_chat_id.clone();
+        app.insert_news_report(&job.id, job.title(), &job.report, true);
+        assert_ne!(app.current_chat_id, active_chat);
+        assert_eq!(app.chat_ui.last().unwrap().text, "Segundo informe");
+        assert_eq!(
+            app.data
+                .db
+                .as_ref()
+                .unwrap()
+                .list_messages(&app.current_chat_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        let db = app.data.db.as_ref().unwrap();
+        let job = &db.scheduled_news().unwrap()[0];
+        assert!(!job.unread);
+        db.toggle_scheduled_news(job).unwrap();
+        assert_eq!(db.scheduled_news().unwrap()[0].report, "Segundo informe");
+        assert!(!db
+            .finish_scheduled_news(&job.id, Ok("resultado tardío"))
+            .unwrap());
+        app.send_user_message("¿Qué radares tenés?".into(), &ctx);
+        let reply = &app.chat_ui.last().unwrap().text;
+        assert!(reply.contains("Hacker News") && reply.contains("Pausado"));
+        assert!(!app.is_thinking);
+        assert_eq!(
+            scheduled_news::reschedule_intervals(
+                "Cambiá el radar de 5 horas para que corra cada tres horas."
+            ),
+            Some((Some(300), 180)),
+        );
+        assert!(!scheduled_news::asks_to_reschedule(
+            "cambialo cada 3 horas",
+            false
+        ));
+        app.chat_history
+            .push(ChatMessage::user("cambialo cada 3 horas"));
+        app.chat_history
+            .push(ChatMessage::assistant_text("No pude modificarlo."));
+        app.send_user_message("cambialo cada 3 horas".into(), &ctx);
+        let db = app.data.db.as_ref().unwrap();
+        let jobs = db.scheduled_news().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].plan.interval_minutes, 180);
+        assert!(!jobs[0].enabled);
+        assert_eq!(jobs[0].report, "Segundo informe");
+        assert!(app.chat_ui.last().unwrap().text.contains("3 h"));
     }
 
     #[test]
