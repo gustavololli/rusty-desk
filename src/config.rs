@@ -14,6 +14,8 @@ pub enum PetSize {
 }
 
 impl PetSize {
+    /// Saved with the config. The floating pet window no longer reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn pixels(self) -> f32 {
         match self {
             Self::Small => 64.0,
@@ -22,6 +24,8 @@ impl PetSize {
         }
     }
 
+    /// Saved with the config. The floating pet window no longer reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn label(self) -> &'static str {
         match self {
             Self::Small => "Pequeño (64px)",
@@ -98,6 +102,8 @@ impl Default for PetConfig {
 
 /// Clamps a saved pet window position so it stays visible within screen bounds.
 /// Falls back to a conservative visible range when screen bounds are unknown.
+/// Kept for installs that still store a pet coordinate. The window no longer uses it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn clamp_pet_position(
     pos: [f32; 2],
     pet_px: f32,
@@ -684,6 +690,26 @@ mod tests {
         assert_eq!(
             compute_island_position(IslandPosition::Top, [100.0, 40.0], None, f32::NAN, None),
             Some([910.0, 12.0])
+        );
+    }
+
+    #[test]
+    fn saved_pet_mode_json_loads_and_migrates_to_the_main_window() {
+        let saved = AppConfig {
+            window_mode: WindowMode::Pet,
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(json.contains("\"Pet\""));
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.window_mode, WindowMode::Pet);
+        assert_eq!(
+            crate::ui::layout::startup_window_mode(parsed.window_mode),
+            WindowMode::Expanded
+        );
+        assert_eq!(
+            crate::ui::layout::startup_window_mode(WindowMode::Island),
+            WindowMode::Island
         );
     }
 }

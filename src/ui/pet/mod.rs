@@ -11,6 +11,7 @@ pub use behavior::PetBehavior;
 pub use events::{EmptySection, PetEvent, WindowMode};
 pub use health::{PetSystemHealth, SystemArea};
 pub use presence::PetPresence;
+#[allow(unused_imports)]
 pub use renderer::PetRenderer;
 
 #[cfg(test)]
