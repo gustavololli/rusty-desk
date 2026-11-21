@@ -697,7 +697,7 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "window_status",
-            "Dice si Rusty está en la ventana principal, en la isla o en modo mascota.",
+            "Dice si Rusty está en la ventana principal o en la isla.",
             json!({ "type": "object", "properties": {} }),
             RiskLevel::Read,
             RiskTier::Low,
