@@ -43,9 +43,11 @@ use crate::ui::avatar::draw_rusty;
 use crate::ui::icons8bit::{paint_pixel_icon, pixel_button, PixelIcon};
 use crate::ui::island::{IslandInput, IslandStateMachine, IslandVisibility};
 use crate::ui::layout::{
-    bubble_text_width, chat_column_geometry, composer_wraps, history_after_resize, maximize_step,
-    split_fenced_blocks, startup_window_mode, toggle_history, HistoryChrome, HistoryPane,
-    MarkdownBlock, MaximizeStep, BUBBLE_INNER_MARGIN,
+    bubble_text_width, chat_regions, composer_block_height, composer_wraps, history_after_resize,
+    history_row_content_width, history_row_layout, maximize_step, split_fenced_blocks,
+    split_scroll_and_composer, startup_window_mode, toggle_history, HistoryChrome, HistoryPane,
+    LogicalRect, MarkdownBlock, MaximizeStep, BUBBLE_INNER_MARGIN, HISTORY_DELETE_WIDTH,
+    HISTORY_ROW_GAP,
 };
 use crate::ui::pet::{
     AnimationController, AnimationFrame, EmptySection, PetBehavior, PetEvent, PetPresence,
@@ -2549,10 +2551,17 @@ impl eframe::App for RustyDeskApp {
             .frame(outer_frame)
             .show(ctx, |ui| {
                 let viewport = ui.max_rect().intersect(ui.clip_rect());
-                let island_frame = console_frame(14.0, 10.0);
+                // Window mode is a layered window so the bezel corners can be
+                // transparent. The interior fill has to be opaque or Windows
+                // composites the desktop through alpha 248.
+                let island_frame = console_frame(14.0, 10.0).fill(NIGHT);
 
                 island_frame.show(ui, |ui| {
-                    ui.set_min_height(ui.available_height().max(0.0));
+                    let cover = Vec2::new(
+                        finite_ui_length(ui.available_width(), 0.0),
+                        finite_ui_length(ui.available_height(), 0.0),
+                    );
+                    ui.set_min_size(cover);
 
                     if self.window_mode == WindowMode::Island {
                         self.render_compact_island(ui, ctx, pointer_pos, accent, &pet_frame);
@@ -3088,48 +3097,58 @@ impl RustyDeskApp {
             ui.add_space(6.0);
         }
 
-        let content_width = ui.available_width();
+        let content_rect = ui.available_rect_before_wrap();
+        let content_width = finite_ui_length(content_rect.width(), 0.0);
+        let content_height = finite_ui_length(content_rect.height(), 0.0);
+        let (content_rect, _) = ui.allocate_exact_size(
+            Vec2::new(content_width, content_height),
+            egui::Sense::hover(),
+        );
+        ui.painter().rect_filled(content_rect, 0.0, NIGHT);
         if !self.show_news_inbox {
-            self.history = history_after_resize(self.history, content_width);
+            self.history = history_after_resize(self.history, content_rect.width());
         }
         let pane = if self.show_news_inbox {
             HistoryPane::Closed
         } else {
             self.history.pane
         };
-        let geo = chat_column_geometry(content_width, pane);
-        let height = finite_ui_length(ui.available_height(), 640.0);
-
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            if geo.sidebar_width > 0.0 {
-                let sidebar_width = geo.sidebar_width.min(ui.available_width());
-                ui.allocate_ui_with_layout(
-                    Vec2::new(sidebar_width, height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_min_height(height);
-                        ui.set_max_width(sidebar_width);
-                        self.render_history_sidebar(ui, accent);
-                    },
-                );
-                ui.add_space(geo.gutter.min(ui.available_width()));
-            }
-            let leading = geo.column_leading.min(ui.available_width());
-            if leading > 0.0 {
-                ui.add_space(leading);
-            }
-            let column_width = geo.column_width.min(ui.available_width()).max(0.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new(column_width, height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_min_width(column_width);
-                    ui.set_max_width(column_width);
-                    self.render_chat_column(ui, ctx, accent, content_width);
-                },
-            );
+        let regions = chat_regions(
+            LogicalRect {
+                x: content_rect.min.x,
+                y: content_rect.min.y,
+                w: content_rect.width(),
+                h: content_rect.height(),
+            },
+            pane,
+        );
+        if let Some(sidebar) = regions.sidebar {
+            self.paint_in_rect(ui, logical_rect(sidebar), |app, ui| {
+                app.render_history_sidebar(ui, accent);
+            });
+        }
+        let column_width = content_rect.width();
+        self.paint_in_rect(ui, logical_rect(regions.column), |app, ui| {
+            app.render_chat_column(ui, ctx, accent, column_width);
         });
+    }
+
+    fn paint_in_rect(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        body: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
+                ui.set_clip_rect(rect);
+                ui.set_width(rect.width().max(0.0));
+                body(self, ui);
+            },
+        );
     }
 
     fn render_chat_column(
@@ -3324,24 +3343,32 @@ impl RustyDeskApp {
                 .color(retro::MUTED),
         )
         .on_hover_text(details);
+        ui.add_space(4.0);
 
-        let rest = finite_ui_length(ui.available_height(), 480.0);
-        ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), rest),
-            egui::Layout::bottom_up(egui::Align::Min),
-            |ui| {
-                self.render_composer(ui, ctx, accent);
-                ui.add_space(6.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("chat_messages")
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        ui.set_max_width(ui.available_width());
-                        self.render_chat_messages(ui, ctx);
-                    });
+        let rest = ui.available_rect_before_wrap();
+        let split = split_scroll_and_composer(
+            LogicalRect {
+                x: rest.min.x,
+                y: rest.min.y,
+                w: finite_ui_length(rest.width(), 0.0),
+                h: finite_ui_length(rest.height(), 0.0),
             },
+            composer_block_height(finite_ui_length(rest.width(), 0.0)),
+            6.0,
         );
+        self.paint_in_rect(ui, logical_rect(split.scroll), |app, ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("chat_messages")
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width().max(0.0));
+                    app.render_chat_messages(ui, ctx);
+                });
+        });
+        self.paint_in_rect(ui, logical_rect(split.composer), |app, ui| {
+            app.render_composer(ui, ctx, accent);
+        });
     }
 
     fn render_history_sidebar(&mut self, ui: &mut egui::Ui, accent: Color32) {
@@ -3412,51 +3439,42 @@ impl RustyDeskApp {
                     scroll.max_height(150.0)
                 };
                 scroll.show(ui, |ui| {
-                    ui.set_max_width(ui.available_width());
+                    let bar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
+                    let row_width = history_row_content_width(ui.available_width(), bar);
+                    ui.set_width(row_width);
                     for s in sessions {
                         let is_current = s.id == self.current_chat_id;
                         let local_dt = format_local_datetime_from_utc(&s.updated_at);
+                        let row =
+                            history_row_layout(row_width, HISTORY_DELETE_WIDTH, HISTORY_ROW_GAP);
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            let (open, delete) = ui
-                                .with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let delete = pixel_button(
-                                            ui,
-                                            PixelIcon::Clear,
-                                            "",
-                                            Color32::from_rgb(127, 29, 29),
-                                            Color32::WHITE,
-                                            "Eliminar chat del historial",
-                                        )
-                                        .clicked();
-                                        let title_w = ui.available_width().max(24.0);
-                                        let chars = ((title_w / 7.0) as usize).clamp(6, 64);
-                                        let label = truncate_chars(
-                                            &format!("{}  ({})", s.title, local_dt),
-                                            chars,
-                                        );
-                                        let open = ui
-                                            .add_sized(
-                                                [title_w, 26.0],
-                                                egui::Button::new(
-                                                    RichText::new(label).size(11.5).color(
-                                                        if is_current {
-                                                            accent
-                                                        } else {
-                                                            Color32::WHITE
-                                                        },
-                                                    ),
-                                                )
-                                                .fill(Color32::from_rgb(26, 35, 52))
-                                                .rounding(0.0),
-                                            )
-                                            .clicked();
-                                        (open, delete)
-                                    },
+                            ui.spacing_mut().item_spacing.x = HISTORY_ROW_GAP;
+                            let chars = ((row.title_width / 7.0) as usize).clamp(4, 64);
+                            let label =
+                                truncate_chars(&format!("{}  ({})", s.title, local_dt), chars);
+                            let open = ui
+                                .add_sized(
+                                    [row.title_width, 26.0],
+                                    egui::Button::new(
+                                        RichText::new(label).size(11.5).color(if is_current {
+                                            accent
+                                        } else {
+                                            Color32::WHITE
+                                        }),
+                                    )
+                                    .fill(Color32::from_rgb(26, 35, 52))
+                                    .rounding(0.0),
                                 )
-                                .inner;
+                                .clicked();
+                            let delete = pixel_button(
+                                ui,
+                                PixelIcon::Clear,
+                                "",
+                                Color32::from_rgb(127, 29, 29),
+                                Color32::WHITE,
+                                "Eliminar chat del historial",
+                            )
+                            .clicked();
                             if open {
                                 self.load_chat_session(s.clone());
                             }
@@ -3597,10 +3615,16 @@ impl RustyDeskApp {
                 ui.set_min_width(inner_w);
                 ui.set_max_width(inner_w);
                 let wrap = composer_wraps(inner_w);
-                // This column is bottom-up, so the first widget sits on the
-                // bottom edge. Wrapped controls are that bottom row; the field
-                // is the row above them.
                 let (action_clicked, enter_pressed) = if wrap {
+                    let input = ui.add_sized(
+                        [inner_w, composer_row_height],
+                        egui::TextEdit::singleline(&mut self.chat_input)
+                            .frame(false)
+                            .hint_text("Escribí una orden o pregunta..."),
+                    );
+                    let enter_pressed =
+                        input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(6.0);
                     let action_clicked = ui
                         .horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
@@ -3611,15 +3635,6 @@ impl RustyDeskApp {
                             .inner
                         })
                         .inner;
-                    ui.add_space(6.0);
-                    let input = ui.add_sized(
-                        [inner_w, composer_row_height],
-                        egui::TextEdit::singleline(&mut self.chat_input)
-                            .frame(false)
-                            .hint_text("Escribí una orden o pregunta..."),
-                    );
-                    let enter_pressed =
-                        input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     (action_clicked, enter_pressed)
                 } else {
                     ui.horizontal(|ui| {
@@ -6598,6 +6613,13 @@ fn playback_status(status: Option<String>) -> Result<String, String> {
         Some(text) => Ok(text),
         None => Err("No pude cambiar de pista.".to_string()),
     }
+}
+
+fn logical_rect(rect: crate::ui::layout::LogicalRect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::Pos2::new(rect.x, rect.y),
+        egui::Vec2::new(rect.w, rect.h),
+    )
 }
 
 fn finite_ui_length(value: f32, fallback: f32) -> f32 {
