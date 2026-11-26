@@ -143,6 +143,10 @@ enum BgEvent {
         id: String,
         result: Result<String, String>,
     },
+    ChatTitleReady {
+        conversation_id: String,
+        title: Option<String>,
+    },
 }
 
 struct StatusBanner {
@@ -1352,6 +1356,17 @@ impl RustyDeskApp {
                     self.report_system_outcome(SystemArea::Tools, !msg.starts_with('⚠'));
                     self.provider_test_status = Some(msg);
                 }
+                BgEvent::ChatTitleReady {
+                    conversation_id,
+                    title,
+                } => {
+                    if let Some(title) = title {
+                        if let Err(err) = self.data.store_generated_title(&conversation_id, &title)
+                        {
+                            eprintln!("No pude guardar el título automático: {err:#}");
+                        }
+                    }
+                }
             }
         }
     }
@@ -2404,6 +2419,7 @@ impl eframe::App for RustyDeskApp {
             }
         }
         self.process_bg_events(ctx);
+        self.spawn_pending_chat_titles(ctx);
         self.tick_scheduled_news(ctx);
         if let Some(banner) = &self.status_banner {
             let remaining = banner.expires_at.saturating_duration_since(Instant::now());
@@ -3446,8 +3462,12 @@ impl RustyDeskApp {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = HISTORY_ROW_GAP;
                             let chars = ((row.title_width / 7.0) as usize).clamp(4, 64);
-                            let label =
-                                truncate_chars(&format!("{}  ({})", s.title, local_dt), chars);
+                            let shown = crate::chat_title::history_label(
+                                &s.title,
+                                s.auto_title.as_deref(),
+                                s.title_custom,
+                            );
+                            let label = truncate_chars(&format!("{shown}  ({local_dt})"), chars);
                             let open = ui
                                 .add_sized(
                                     [row.title_width, 26.0],
@@ -6147,6 +6167,31 @@ impl RustyDeskApp {
             };
             let _ = tx.send(BgEvent::ProviderTestResult(msg));
         });
+    }
+
+    fn spawn_pending_chat_titles(&mut self, ctx: &egui::Context) {
+        let jobs = self.data.take_pending_auto_titles();
+        for job in jobs {
+            let dreaming = self.config.dreaming.clone();
+            let active = self.build_provider();
+            let tx = self.bg_tx.clone();
+            let ctx = ctx.clone();
+            self.rt.spawn(async move {
+                let title = crate::chat_title::generate_chat_title(
+                    &dreaming,
+                    active.as_ref(),
+                    &job.user_text,
+                    &job.assistant_text,
+                    crate::chat_title::PROBE_TIMEOUT,
+                )
+                .await;
+                let _ = tx.send(BgEvent::ChatTitleReady {
+                    conversation_id: job.conversation_id,
+                    title,
+                });
+                ctx.request_repaint();
+            });
+        }
     }
 
     fn spawn_dreaming(&mut self, ctx: egui::Context) {

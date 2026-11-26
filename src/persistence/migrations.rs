@@ -261,6 +261,14 @@ const MIGRATIONS: &[Migration] = &[
         name: "0008_scheduled_news_inbox",
         sql: "ALTER TABLE scheduled_news ADD COLUMN unread INTEGER NOT NULL DEFAULT 0 CHECK (unread IN (0, 1));",
     },
+    Migration {
+        version: 9,
+        name: "0009_conversation_auto_title",
+        sql: "
+        ALTER TABLE conversations ADD COLUMN auto_title TEXT;
+        ALTER TABLE conversations ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0;
+        ",
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> anyhow::Result<()> {

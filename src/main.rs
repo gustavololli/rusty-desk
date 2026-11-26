@@ -1,5 +1,6 @@
 mod agent;
 mod ai;
+mod chat_title;
 mod config;
 mod converter;
 mod dreaming;
