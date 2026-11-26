@@ -402,6 +402,7 @@ pub struct AppData {
     pub db: Option<Database>,
     pub startup_error: Option<String>,
     pub migration_notice: Option<String>,
+    pending_auto_titles: Vec<crate::chat_title::PendingTitle>,
 }
 
 impl Default for AppData {
@@ -417,6 +418,7 @@ impl Default for AppData {
             db: None,
             startup_error: None,
             migration_notice: None,
+            pending_auto_titles: Vec::new(),
         }
     }
 }
@@ -620,6 +622,7 @@ impl AppData {
             db: Some(db),
             startup_error: None,
             migration_notice: None,
+            pending_auto_titles: Vec::new(),
         })
     }
 
@@ -1093,7 +1096,63 @@ impl AppData {
             raw_gemini_parts_json,
             created_at: Utc::now().to_rfc3339(),
         })?;
+        if let Err(err) = self.maybe_queue_auto_title(conversation_id) {
+            eprintln!("No pude preparar el título automático: {err:#}");
+        }
         Ok(msg_id)
+    }
+
+    fn maybe_queue_auto_title(&mut self, conversation_id: &str) -> anyhow::Result<()> {
+        if self
+            .pending_auto_titles
+            .iter()
+            .any(|job| job.conversation_id == conversation_id)
+        {
+            return Ok(());
+        }
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
+        let Some((auto_title, title_custom)) = db.conversation_heading(conversation_id)? else {
+            return Ok(());
+        };
+        let (user_text_count, assistant_text_count) = db.count_text_messages(conversation_id)?;
+        if !crate::chat_title::should_request_title(&crate::chat_title::TitleTrigger {
+            user_text_count,
+            assistant_text_count,
+            auto_title,
+            title_custom,
+        }) {
+            return Ok(());
+        }
+        let Some((user_text, assistant_text)) = db.first_exchange_texts(conversation_id)? else {
+            return Ok(());
+        };
+        if !db.claim_auto_title_attempt(conversation_id)? {
+            return Ok(());
+        }
+        self.pending_auto_titles
+            .push(crate::chat_title::PendingTitle {
+                conversation_id: conversation_id.to_string(),
+                user_text,
+                assistant_text,
+            });
+        Ok(())
+    }
+
+    pub fn take_pending_auto_titles(&mut self) -> Vec<crate::chat_title::PendingTitle> {
+        std::mem::take(&mut self.pending_auto_titles)
+    }
+
+    pub fn store_generated_title(
+        &self,
+        conversation_id: &str,
+        title: &str,
+    ) -> anyhow::Result<bool> {
+        let Some(db) = &self.db else {
+            return Ok(false);
+        };
+        db.store_generated_title(conversation_id, title)
     }
 
     pub fn has_tool_execution(
@@ -1561,5 +1620,154 @@ mod tests {
         habit.ensure_today();
         assert_eq!(habit.current_count, 0);
         assert_eq!(habit.last_date, chrono::Local::now().date_naive());
+    }
+
+    #[test]
+    fn auto_title_is_queued_once_after_the_first_text_exchange() {
+        let db = Database::open_in_memory().unwrap();
+        let mut data = AppData::from_database(db).unwrap();
+        let id = "conv-title";
+
+        data.record_chat_message(
+            id,
+            Some("pone musica"),
+            &ChatMessage::user("pone musica"),
+            MessageKind::Text,
+        )
+        .unwrap();
+        assert!(data.take_pending_auto_titles().is_empty());
+
+        let tool = ChatMessage {
+            role: "assistant".into(),
+            content: Some("voy a reproducir".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            raw_gemini_parts: None,
+        };
+        data.record_chat_message(id, None, &tool, MessageKind::ToolCall)
+            .unwrap();
+        assert!(
+            data.take_pending_auto_titles().is_empty(),
+            "a tool call is not the assistant reply that titles the chat"
+        );
+
+        data.record_chat_message(
+            id,
+            None,
+            &ChatMessage::assistant_text("Reproduciendo la playlist."),
+            MessageKind::Text,
+        )
+        .unwrap();
+        let pending = data.take_pending_auto_titles();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].user_text, "pone musica");
+        assert_eq!(pending[0].assistant_text, "Reproduciendo la playlist.");
+
+        data.record_chat_message(
+            id,
+            Some("otra cosa"),
+            &ChatMessage::user("otra cosa"),
+            MessageKind::Text,
+        )
+        .unwrap();
+        data.record_chat_message(
+            id,
+            None,
+            &ChatMessage::assistant_text("Sigo acá."),
+            MessageKind::Text,
+        )
+        .unwrap();
+        assert!(data.take_pending_auto_titles().is_empty());
+
+        let saved = data.list_conversations_page(10, 0).unwrap();
+        assert_eq!(saved[0].title, "pone musica");
+        assert_eq!(saved[0].auto_title.as_deref(), Some(""));
+        assert!(data.store_generated_title(id, "Música en casa").unwrap());
+        let titled = data.list_conversations_page(10, 0).unwrap();
+        assert_eq!(titled[0].auto_title.as_deref(), Some("Música en casa"));
+        assert_eq!(titled[0].title, "pone musica");
+        assert_eq!(
+            crate::chat_title::history_label(
+                &titled[0].title,
+                titled[0].auto_title.as_deref(),
+                titled[0].title_custom
+            ),
+            "Música en casa"
+        );
+    }
+
+    #[test]
+    fn old_chats_are_not_titled_on_load_or_when_the_title_was_edited() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.ensure_conversation("old", "pone musica").unwrap();
+        db.append_message(&crate::persistence::NewPersistedMessage {
+            id: "u".into(),
+            conversation_id: "old".into(),
+            role: "user".into(),
+            kind: MessageKind::Text,
+            content: Some("pone musica".into()),
+            tool_calls_json: None,
+            tool_call_id: None,
+            raw_gemini_parts_json: None,
+            created_at: "2026-11-22T16:00:00Z".into(),
+        })
+        .unwrap();
+        db.append_message(&crate::persistence::NewPersistedMessage {
+            id: "a".into(),
+            conversation_id: "old".into(),
+            role: "assistant".into(),
+            kind: MessageKind::Text,
+            content: Some("Listo.".into()),
+            tool_calls_json: None,
+            tool_call_id: None,
+            raw_gemini_parts_json: None,
+            created_at: "2026-11-22T16:00:01Z".into(),
+        })
+        .unwrap();
+        let mut data = AppData::from_database(db).unwrap();
+        let loaded = data.list_conversations_page(10, 0).unwrap();
+        assert!(loaded[0].auto_title.is_none());
+        assert!(data.take_pending_auto_titles().is_empty());
+
+        data.record_chat_message(
+            "old",
+            Some("seguimos"),
+            &ChatMessage::user("seguimos"),
+            MessageKind::Text,
+        )
+        .unwrap();
+        assert!(
+            data.take_pending_auto_titles().is_empty(),
+            "continuing an old chat must not spend a title call"
+        );
+
+        data.record_chat_message(
+            "edited",
+            Some("primer mensaje"),
+            &ChatMessage::user("primer mensaje"),
+            MessageKind::Text,
+        )
+        .unwrap();
+        data.db
+            .as_ref()
+            .unwrap()
+            .customize_conversation_title("edited", "Nombre elegido")
+            .unwrap();
+        data.record_chat_message(
+            "edited",
+            None,
+            &ChatMessage::assistant_text("Respuesta."),
+            MessageKind::Text,
+        )
+        .unwrap();
+        assert!(data.take_pending_auto_titles().is_empty());
+        let edited = data
+            .list_conversations_page(10, 0)
+            .unwrap()
+            .into_iter()
+            .find(|chat| chat.id == "edited")
+            .unwrap();
+        assert_eq!(edited.title, "Nombre elegido");
+        assert!(edited.auto_title.is_none());
     }
 }

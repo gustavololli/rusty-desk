@@ -4,6 +4,7 @@ pub mod migrations;
 use chrono::{NaiveDate, Utc};
 use directories::ProjectDirs;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -82,13 +83,19 @@ pub struct NewMusicTrack {
     pub duration_secs: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationSummary {
     pub id: String,
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
     pub message_count: usize,
+    /// Model title. Missing on chats saved before this field existed.
+    #[serde(default)]
+    pub auto_title: Option<String>,
+    /// Set when the person renames the chat. Automatic titles must not replace it.
+    #[serde(default)]
+    pub title_custom: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,19 +703,23 @@ impl Database {
     ) -> anyhow::Result<Vec<ConversationSummary>> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.title, c.created_at, c.updated_at,
-                    (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.deleted_at IS NULL) AS msg_count
+                    (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.deleted_at IS NULL) AS msg_count,
+                    c.auto_title, c.title_custom
              FROM conversations c
              WHERE c.deleted_at IS NULL
              ORDER BY c.updated_at DESC
              LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            let custom: i64 = row.get(6)?;
             Ok(ConversationSummary {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 created_at: row.get(2)?,
                 updated_at: row.get(3)?,
                 message_count: row.get(4)?,
+                auto_title: row.get(5)?,
+                title_custom: custom != 0,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -727,10 +738,105 @@ impl Database {
     pub fn update_conversation_title(&self, id: &str, title: &str) -> anyhow::Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
-            "UPDATE conversations SET title = ?2, updated_at = ?3, version = version + 1, dirty = 1 WHERE id = ?1",
+            "UPDATE conversations SET title = ?2, updated_at = ?3, version = version + 1, dirty = 1
+             WHERE id = ?1 AND title_custom = 0",
             params![id, title, now],
         )?;
         Ok(())
+    }
+
+    /// Person-chosen title. The chat screen does not rename chats yet; automatic
+    /// titles already refuse to replace a row marked with `title_custom`.
+    #[allow(dead_code)]
+    pub fn customize_conversation_title(&self, id: &str, title: &str) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE conversations SET title = ?2, title_custom = 1, updated_at = ?3, version = version + 1, dirty = 1
+             WHERE id = ?1",
+            params![id, title, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn conversation_heading(&self, id: &str) -> anyhow::Result<Option<(Option<String>, bool)>> {
+        self.conn
+            .query_row(
+                "SELECT auto_title, title_custom FROM conversations WHERE id = ?1 AND deleted_at IS NULL",
+                [id],
+                |row| {
+                    let custom: i64 = row.get(1)?;
+                    Ok((row.get(0)?, custom != 0))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn count_text_messages(&self, conversation_id: &str) -> anyhow::Result<(usize, usize)> {
+        let (user, assistant): (i64, i64) = self.conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN role = 'user' AND kind = 'text'
+                    AND content IS NOT NULL AND LENGTH(TRIM(content)) > 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'assistant' AND kind = 'text'
+                    AND content IS NOT NULL AND LENGTH(TRIM(content)) > 0 THEN 1 ELSE 0 END), 0)
+             FROM messages
+             WHERE conversation_id = ?1 AND deleted_at IS NULL",
+            [conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((user as usize, assistant as usize))
+    }
+
+    pub fn first_exchange_texts(
+        &self,
+        conversation_id: &str,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        let user = self.first_text(conversation_id, "user")?;
+        let assistant = self.first_text(conversation_id, "assistant")?;
+        Ok(match (user, assistant) {
+            (Some(user), Some(assistant)) => Some((user, assistant)),
+            _ => None,
+        })
+    }
+
+    fn first_text(&self, conversation_id: &str, role: &str) -> anyhow::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT content FROM messages
+                 WHERE conversation_id = ?1 AND deleted_at IS NULL AND kind = 'text' AND role = ?2
+                   AND content IS NOT NULL AND LENGTH(TRIM(content)) > 0
+                 ORDER BY seq ASC LIMIT 1",
+                params![conversation_id, role],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Marks the single attempt. A later message must not spend another call.
+    pub fn claim_auto_title_attempt(&self, id: &str) -> anyhow::Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE conversations SET auto_title = ''
+             WHERE id = ?1 AND title_custom = 0 AND auto_title IS NULL AND deleted_at IS NULL",
+            [id],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Writes the generated title only while the attempt is still blank.
+    pub fn store_generated_title(&self, id: &str, title: &str) -> anyhow::Result<bool> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+        let updated = self.conn.execute(
+            "UPDATE conversations SET auto_title = ?2
+             WHERE id = ?1 AND title_custom = 0
+               AND (auto_title IS NULL OR TRIM(auto_title) = '')
+               AND deleted_at IS NULL",
+            params![id, trimmed],
+        )?;
+        Ok(updated == 1)
     }
 
     pub fn soft_delete_conversation(&self, id: &str) -> anyhow::Result<()> {
@@ -1347,7 +1453,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         migrations::run_migrations(&mut db.conn).unwrap();
         let count: i64 = db
             .conn
@@ -1355,7 +1461,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 8);
+        assert_eq!(count, 9);
 
         db.ensure_conversation("c1", "Chat").unwrap();
         let text = NewPersistedMessage {
@@ -1403,5 +1509,55 @@ mod tests {
         assert_eq!(memories.len(), 2);
         db.dreaming_delete_memory(&memories[0].0).unwrap();
         assert_eq!(db.dreaming_list_memories().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn old_conversation_json_without_auto_title_loads() {
+        let raw = r#"{"id":"c1","title":"pone musica","created_at":"2026-11-22T16:00:00Z","updated_at":"2026-11-22T16:00:00Z","message_count":2}"#;
+        let parsed: ConversationSummary = serde_json::from_str(raw).unwrap();
+        assert!(parsed.auto_title.is_none());
+        assert!(!parsed.title_custom);
+        assert_eq!(
+            crate::chat_title::history_label(&parsed.title, parsed.auto_title.as_deref(), false),
+            "pone musica"
+        );
+    }
+
+    #[test]
+    fn saved_chats_without_auto_title_keep_the_fallback_and_custom_titles_stick() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_conversation("old", "pone musica").unwrap();
+        let listed = db.list_conversations_page(10, 0).unwrap();
+        assert_eq!(listed[0].title, "pone musica");
+        assert!(listed[0].auto_title.is_none());
+        assert!(!listed[0].title_custom);
+
+        assert!(db.claim_auto_title_attempt("old").unwrap());
+        assert!(!db.claim_auto_title_attempt("old").unwrap());
+        let claimed = db.list_conversations_page(10, 0).unwrap();
+        assert_eq!(claimed[0].auto_title.as_deref(), Some(""));
+        assert_eq!(claimed[0].title, "pone musica");
+
+        assert!(db.store_generated_title("old", "Música en casa").unwrap());
+        assert!(!db.store_generated_title("old", "Otro título").unwrap());
+        let titled = db.list_conversations_page(10, 0).unwrap();
+        assert_eq!(titled[0].auto_title.as_deref(), Some("Música en casa"));
+        assert_eq!(titled[0].title, "pone musica");
+
+        db.customize_conversation_title("old", "Nombre elegido")
+            .unwrap();
+        db.update_conversation_title("old", "esto no pisa").unwrap();
+        assert!(!db.store_generated_title("old", "Tampoco").unwrap());
+        let custom = db.list_conversations_page(10, 0).unwrap();
+        assert_eq!(custom[0].title, "Nombre elegido");
+        assert!(custom[0].title_custom);
+        assert_eq!(
+            crate::chat_title::history_label(
+                &custom[0].title,
+                custom[0].auto_title.as_deref(),
+                custom[0].title_custom
+            ),
+            "Nombre elegido"
+        );
     }
 }

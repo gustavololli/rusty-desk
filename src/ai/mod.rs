@@ -170,6 +170,16 @@ pub trait AiProvider: Send + Sync {
     async fn chat(&self, messages: &[ChatMessage], tools: &[ToolDef])
         -> anyhow::Result<AiResponse>;
 
+    /// One short completion with no tools. Providers that can cap output do so.
+    async fn chat_brief(
+        &self,
+        messages: &[ChatMessage],
+        max_tokens: u32,
+    ) -> anyhow::Result<AiResponse> {
+        let _ = max_tokens;
+        self.chat(messages, &[]).await
+    }
+
     async fn transcribe(&self, wav_bytes: Vec<u8>) -> anyhow::Result<String>;
 }
 
@@ -567,6 +577,27 @@ impl AiProvider for OpenAiCompatibleProvider {
         parse_openai_chat_response(&text)
     }
 
+    async fn chat_brief(
+        &self,
+        messages: &[ChatMessage],
+        max_tokens: u32,
+    ) -> anyhow::Result<AiResponse> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let mut body = build_openai_chat_request(&self.model, messages, &[]);
+        body["max_tokens"] = json!(max_tokens);
+        let mut req = self.client.post(&url).json(&body);
+        if !self.api_key.trim().is_empty() {
+            req = req.bearer_auth(self.api_key.trim());
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("Error de API ({status}): {text}");
+        }
+        parse_openai_chat_response(&text)
+    }
+
     async fn transcribe(&self, wav_bytes: Vec<u8>) -> anyhow::Result<String> {
         let url = format!("{}/audio/transcriptions", self.base_url);
         let part = multipart::Part::bytes(wav_bytes)
@@ -869,6 +900,33 @@ impl AiProvider for GoogleGeminiProvider {
             anyhow::bail!("Error de Gemini ({last_status}): {text}");
         }
 
+        parse_gemini_response(&text)
+    }
+
+    async fn chat_brief(
+        &self,
+        messages: &[ChatMessage],
+        max_tokens: u32,
+    ) -> anyhow::Result<AiResponse> {
+        let mut body = build_gemini_request(messages, &[]);
+        body["generationConfig"] = json!({ "maxOutputTokens": max_tokens });
+        let url = format!("{}/models/{}:generateContent", self.base_url, self.model);
+        let resp = self
+            .client
+            .post(&url)
+            .header("X-goog-api-key", self.api_key.trim())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| anyhow::anyhow!("Error de red con Gemini: {err:#}"))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|err| anyhow::anyhow!("Error leyendo respuesta de Gemini: {err:#}"))?;
+        if !status.is_success() {
+            anyhow::bail!("Error de Gemini ({status}): {text}");
+        }
         parse_gemini_response(&text)
     }
 
