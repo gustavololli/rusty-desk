@@ -1,4 +1,5 @@
 pub mod avatar;
+pub mod chat_nav;
 pub mod frame9;
 pub mod icons8bit;
 pub mod island;
@@ -215,6 +216,10 @@ pub struct RustyDeskApp {
     session_tokens: Option<TokenUsage>,
     chat_history: Vec<ChatMessage>,
     chat_input: String,
+    /// Last transcript scroll offset, in logical points. Survives leaving the Chat tab.
+    chat_scroll_y: f32,
+    /// Applied once when Chat is shown again, so egui does not open the transcript at the top.
+    chat_scroll_hold: Option<f32>,
     is_thinking: bool,
     current_chat_id: String,
     history: HistoryChrome,
@@ -400,6 +405,8 @@ impl RustyDeskApp {
             session_tokens: None,
             chat_history: vec![ChatMessage::system(&system_prompt)],
             chat_input: String::new(),
+            chat_scroll_y: 0.0,
+            chat_scroll_hold: None,
             is_thinking: false,
             current_chat_id: Uuid::new_v4().to_string(),
             history: HistoryChrome::startup(),
@@ -1710,6 +1717,34 @@ impl RustyDeskApp {
         }
     }
 
+    /// Section changes never allocate a conversation. The Chat tab shows the one already open.
+    fn select_section(&mut self, tab: ActiveTab) {
+        let from_chat = self.active_tab == ActiveTab::Chat;
+        let to_chat = tab == ActiveTab::Chat;
+        let next = chat_nav::change_section(
+            chat_nav::ActiveConversation {
+                id: self.current_chat_id.clone(),
+                messages: self
+                    .chat_ui
+                    .iter()
+                    .map(|entry| entry.text.clone())
+                    .collect(),
+                draft: self.chat_input.clone(),
+                scroll_y: self.chat_scroll_y,
+            },
+            from_chat,
+            to_chat,
+            self.show_news_inbox,
+            self.chat_scroll_hold,
+        );
+        self.current_chat_id = next.conversation.id;
+        self.chat_input = next.conversation.draft;
+        self.chat_scroll_y = next.conversation.scroll_y;
+        self.show_news_inbox = next.news_inbox_open;
+        self.chat_scroll_hold = next.scroll_hold;
+        self.active_tab = tab;
+    }
+
     fn start_new_chat(&mut self) {
         self.invalidate_chat_turn();
         self.turn_tokens = None;
@@ -1720,12 +1755,16 @@ impl RustyDeskApp {
             self.history = HistoryChrome::closed_by_user();
         }
         self.show_news_inbox = false;
+        self.chat_input.clear();
+        self.chat_scroll_y = 0.0;
+        self.chat_scroll_hold = None;
         self.is_thinking = false;
         self.mood = AssistantMood::Idle;
     }
 
     fn load_chat_session(&mut self, session: ConversationSummary) {
         if self.current_chat_id == session.id {
+            self.show_news_inbox = false;
             if self.history.pane == HistoryPane::Inline {
                 self.history = HistoryChrome::closed_by_user();
             }
@@ -1748,6 +1787,10 @@ impl RustyDeskApp {
                 if self.history.pane == HistoryPane::Inline {
                     self.history = HistoryChrome::closed_by_user();
                 }
+                self.chat_input.clear();
+                self.chat_scroll_y = 0.0;
+                self.chat_scroll_hold = None;
+                self.show_news_inbox = false;
                 self.is_thinking = false;
                 self.mood = AssistantMood::Idle;
             }
@@ -1874,7 +1917,7 @@ impl RustyDeskApp {
         }) {
             self.import_m3u_from_path(first_m3u);
             if self.window_mode == WindowMode::Expanded {
-                self.active_tab = ActiveTab::Music;
+                self.select_section(ActiveTab::Music);
             }
             return;
         }
@@ -1883,7 +1926,7 @@ impl RustyDeskApp {
             self.notify_chat_files(&paths, ctx);
         } else {
             if self.window_mode == WindowMode::Expanded {
-                self.active_tab = ActiveTab::Markdown;
+                self.select_section(ActiveTab::Markdown);
             }
             if let Some(first) = paths.into_iter().next() {
                 self.start_markdown_conversion(first, ctx);
@@ -2694,78 +2737,23 @@ impl eframe::App for RustyDeskApp {
                         .inner_margin(4.0)
                         .show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
-                                nav_pill(
-                                    ui,
-                                    &mut self.active_tab,
-                                    ActiveTab::Chat,
-                                    PixelIcon::Chat,
-                                    "Chat",
-                                    accent,
-                                );
-                                nav_pill(
-                                    ui,
-                                    &mut self.active_tab,
-                                    ActiveTab::Tasks,
-                                    PixelIcon::Tasks,
-                                    "Tareas",
-                                    accent,
-                                );
-                                nav_pill(
-                                    ui,
-                                    &mut self.active_tab,
-                                    ActiveTab::Habits,
-                                    PixelIcon::Habits,
-                                    "Hábitos",
-                                    accent,
-                                );
-                                nav_pill(
-                                    ui,
-                                    &mut self.active_tab,
-                                    ActiveTab::Focus,
-                                    PixelIcon::Focus,
-                                    "Pomodoro",
-                                    accent,
-                                );
-                                nav_pill(
-                                    ui,
-                                    &mut self.active_tab,
-                                    ActiveTab::Music,
-                                    PixelIcon::MusicNote,
-                                    "Música",
-                                    accent,
-                                );
-                                nav_pill(
-                                    ui,
-                                    &mut self.active_tab,
-                                    ActiveTab::Organizer,
-                                    PixelIcon::Organizer,
-                                    "Organizador",
-                                    accent,
-                                );
-                                nav_pill(
-                                    ui,
-                                    &mut self.active_tab,
-                                    ActiveTab::Markdown,
-                                    PixelIcon::Markdown,
-                                    "MarkItDown",
-                                    accent,
-                                );
-                                nav_pill(
-                                    ui,
-                                    &mut self.active_tab,
-                                    ActiveTab::Compact,
-                                    PixelIcon::Compact,
-                                    "Compactar",
-                                    accent,
-                                );
-                                nav_pill(
-                                    ui,
-                                    &mut self.active_tab,
-                                    ActiveTab::Settings,
-                                    PixelIcon::Settings,
-                                    "Configuración",
-                                    accent,
-                                );
+                                for (tab, icon, label) in [
+                                    (ActiveTab::Chat, PixelIcon::Chat, "Chat"),
+                                    (ActiveTab::Tasks, PixelIcon::Tasks, "Tareas"),
+                                    (ActiveTab::Habits, PixelIcon::Habits, "Hábitos"),
+                                    (ActiveTab::Focus, PixelIcon::Focus, "Pomodoro"),
+                                    (ActiveTab::Music, PixelIcon::MusicNote, "Música"),
+                                    (ActiveTab::Organizer, PixelIcon::Organizer, "Organizador"),
+                                    (ActiveTab::Markdown, PixelIcon::Markdown, "MarkItDown"),
+                                    (ActiveTab::Compact, PixelIcon::Compact, "Compactar"),
+                                    (ActiveTab::Settings, PixelIcon::Settings, "Configuración"),
+                                ] {
+                                    if nav_pill(ui, self.active_tab, tab, icon, label, accent)
+                                        .clicked()
+                                    {
+                                        self.select_section(tab);
+                                    }
+                                }
                             });
                             ui.label(
                                 RichText::new(self.active_tab.title())
@@ -3357,14 +3345,22 @@ impl RustyDeskApp {
             6.0,
         );
         self.paint_in_rect(ui, logical_rect(split.scroll), |app, ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("chat_messages")
+            let restore = app.chat_scroll_hold;
+            let mut scroll = egui::ScrollArea::vertical()
+                .id_salt(("active_chat_transcript", app.current_chat_id.clone()))
                 .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width().max(0.0));
-                    app.render_chat_messages(ui, ctx);
-                });
+                .stick_to_bottom(restore.is_none());
+            if let Some(offset) = restore {
+                scroll = scroll.vertical_scroll_offset(offset);
+            }
+            let shown = scroll.show(ui, |ui| {
+                ui.set_width(ui.available_width().max(0.0));
+                app.render_chat_messages(ui, ctx);
+            });
+            app.chat_scroll_y = shown.state.offset.y;
+            if restore.is_some() {
+                app.chat_scroll_hold = None;
+            }
         });
         self.paint_in_rect(ui, logical_rect(split.composer), |app, ui| {
             app.render_composer(ui, ctx, accent);
@@ -4865,7 +4861,7 @@ impl RustyDeskApp {
                                 }),
                             );
                             if !compact_island && lbl.clicked() {
-                                self.active_tab = ActiveTab::Music;
+                                self.select_section(ActiveTab::Music);
                             }
                         },
                     );
@@ -6489,13 +6485,13 @@ impl RustyDeskApp {
 
 fn nav_pill(
     ui: &mut egui::Ui,
-    active: &mut ActiveTab,
+    active: ActiveTab,
     tab: ActiveTab,
     icon: PixelIcon,
     label: &str,
     accent: Color32,
-) {
-    let selected = *active == tab;
+) -> egui::Response {
+    let selected = active == tab;
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(32.0, 28.0), egui::Sense::click());
     let pressed = resp.is_pointer_button_down_on();
     let hovered = resp.hovered();
@@ -6525,10 +6521,7 @@ fn nav_pill(
         let icon_rect = egui::Rect::from_center_size(rect.center() + shift, Vec2::splat(16.0));
         paint_pixel_icon(ui.painter(), icon_rect, icon, icon_color);
     }
-    if resp.clicked() {
-        *active = tab;
-    }
-    resp.on_hover_text(RichText::new(label).size(12.0).color(IVORY));
+    resp.on_hover_text(RichText::new(label).size(12.0).color(IVORY))
 }
 
 impl ActiveTab {
@@ -6715,6 +6708,33 @@ mod text_tests {
     use crate::persistence::Database;
     use serde_json::json;
     use std::time::Duration;
+
+    #[test]
+    fn chat_then_settings_then_chat_keeps_the_same_conversation() {
+        let ctx = egui::Context::default();
+        let mut app = in_memory_app(&ctx);
+        let id = app.current_chat_id.clone();
+        app.chat_ui.push(UiChatEntry::user("sigue acá"));
+        app.chat_input = "borrador".into();
+        app.chat_scroll_y = 180.0;
+        app.show_news_inbox = true;
+
+        app.select_section(ActiveTab::Settings);
+        app.select_section(ActiveTab::Chat);
+
+        assert_eq!(app.active_tab, ActiveTab::Chat);
+        assert_eq!(app.current_chat_id, id);
+        assert!(
+            app.chat_ui.iter().any(|entry| entry.text == "sigue acá"),
+            "the Chat tab must show the conversation that was already open"
+        );
+        assert_eq!(app.chat_input, "borrador");
+        assert!(
+            !app.show_news_inbox,
+            "Chat shows the conversation, not another panel"
+        );
+        assert_eq!(app.chat_scroll_hold, Some(180.0));
+    }
 
     fn in_memory_app(ctx: &egui::Context) -> RustyDeskApp {
         RustyDeskApp::from_state(
