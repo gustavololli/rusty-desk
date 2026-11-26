@@ -2,9 +2,12 @@ use crate::ui::avatar::draw_rusty;
 use crate::ui::pet::animation::AnimationFrame;
 use eframe::egui::{self, Pos2};
 
-/// Renders the 16-bit Rusty robot in floating Pet mode.
+/// Draws Rusty's sprite. The floating pet window is retired; the header,
+/// island and notch call `draw_rusty` directly and this wrapper stays for that sprite.
+#[allow(dead_code)]
 pub struct PetRenderer;
 
+#[allow(dead_code)]
 impl PetRenderer {
     pub fn render(
         ui: &mut egui::Ui,

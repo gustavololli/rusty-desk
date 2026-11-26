@@ -2,6 +2,7 @@ pub mod avatar;
 pub mod frame9;
 pub mod icons8bit;
 pub mod island;
+pub mod layout;
 pub mod pet;
 pub mod retro;
 pub mod sprites;
@@ -13,8 +14,7 @@ use crate::ai::{
     OpenAiCompatibleProvider, ToolDispatch,
 };
 use crate::config::{
-    clamp_pet_position, clamp_window_position, AppConfig, IslandPosition, PetIntensity, PetSize,
-    SearchProviderId,
+    clamp_window_position, AppConfig, IslandPosition, PetIntensity, SearchProviderId,
 };
 use crate::converter::{self, CompactionMode};
 use crate::free_tools::{
@@ -42,9 +42,16 @@ use crate::tools::{
 use crate::ui::avatar::draw_rusty;
 use crate::ui::icons8bit::{paint_pixel_icon, pixel_button, PixelIcon};
 use crate::ui::island::{IslandInput, IslandStateMachine, IslandVisibility};
+use crate::ui::layout::{
+    bubble_text_width, chat_regions, composer_block_height, composer_wraps, history_after_resize,
+    history_row_content_width, history_row_layout, maximize_step, split_fenced_blocks,
+    split_scroll_and_composer, startup_window_mode, toggle_history, HistoryChrome, HistoryPane,
+    LogicalRect, MarkdownBlock, MaximizeStep, BUBBLE_INNER_MARGIN, HISTORY_DELETE_WIDTH,
+    HISTORY_ROW_GAP,
+};
 use crate::ui::pet::{
     AnimationController, AnimationFrame, EmptySection, PetBehavior, PetEvent, PetPresence,
-    PetRenderer, PetSystemHealth, SystemArea, WindowMode,
+    PetSystemHealth, SystemArea, WindowMode,
 };
 use crate::voice::{speak_local_async, ActiveRecording};
 use eframe::egui::{self, Color32, Pos2, RichText, Rounding, Stroke, Vec2};
@@ -199,8 +206,6 @@ pub struct RustyDeskApp {
     pet_behavior: PetBehavior,
     pet_presence: PetPresence,
     pet_system_health: PetSystemHealth,
-    pet_drag_origin: Option<Pos2>,
-    pet_dragging: bool,
     last_frame_time: f64,
     screen_bounds: Option<(f32, f32, f32, f32)>,
 
@@ -212,7 +217,8 @@ pub struct RustyDeskApp {
     chat_input: String,
     is_thinking: bool,
     current_chat_id: String,
-    show_chat_history: bool,
+    history: HistoryChrome,
+    restore_inner_size: Option<[f32; 2]>,
     history_page: usize,
     pending_confirmations: VecDeque<PendingConfirmation>,
     confirmation_started: Option<Instant>,
@@ -352,11 +358,11 @@ impl RustyDeskApp {
             config.island_custom_position = Some(clamped);
         }
 
-        let initial_mode = if config.window_mode == WindowMode::Pet && !config.pet.enabled {
-            WindowMode::Island
-        } else {
-            config.window_mode
-        };
+        let initial_mode = startup_window_mode(config.window_mode);
+        if initial_mode != config.window_mode {
+            config.window_mode = initial_mode;
+            let _ = config.save();
+        }
 
         let initial_mood = if data.pomodoro.running && data.pomodoro.phase == PomodoroPhase::Work {
             AssistantMood::Focused
@@ -386,8 +392,6 @@ impl RustyDeskApp {
             pet_behavior: PetBehavior::new(0.0),
             pet_presence: PetPresence::default(),
             pet_system_health: PetSystemHealth::default(),
-            pet_drag_origin: None,
-            pet_dragging: false,
             last_frame_time: 0.0,
             screen_bounds,
             chat_ui: vec![UiChatEntry::assistant(&welcome)],
@@ -398,7 +402,8 @@ impl RustyDeskApp {
             chat_input: String::new(),
             is_thinking: false,
             current_chat_id: Uuid::new_v4().to_string(),
-            show_chat_history: false,
+            history: HistoryChrome::startup(),
+            restore_inner_size: None,
             history_page: 0,
             pending_confirmations: VecDeque::new(),
             confirmation_started: None,
@@ -1711,7 +1716,9 @@ impl RustyDeskApp {
         self.current_chat_id = Uuid::new_v4().to_string();
         self.chat_ui = vec![UiChatEntry::assistant(&self.welcome_text)];
         self.chat_history = vec![ChatMessage::system(&self.system_prompt)];
-        self.show_chat_history = false;
+        if self.history.pane == HistoryPane::Inline {
+            self.history = HistoryChrome::closed_by_user();
+        }
         self.show_news_inbox = false;
         self.is_thinking = false;
         self.mood = AssistantMood::Idle;
@@ -1719,7 +1726,9 @@ impl RustyDeskApp {
 
     fn load_chat_session(&mut self, session: ConversationSummary) {
         if self.current_chat_id == session.id {
-            self.show_chat_history = false;
+            if self.history.pane == HistoryPane::Inline {
+                self.history = HistoryChrome::closed_by_user();
+            }
             return;
         }
         match self
@@ -1736,7 +1745,9 @@ impl RustyDeskApp {
                     ui_entries
                 };
                 self.chat_history = tech_history;
-                self.show_chat_history = false;
+                if self.history.pane == HistoryPane::Inline {
+                    self.history = HistoryChrome::closed_by_user();
+                }
                 self.is_thinking = false;
                 self.mood = AssistantMood::Idle;
             }
@@ -1884,6 +1895,21 @@ impl RustyDeskApp {
         self.pet_behavior.record_activity(self.last_frame_time);
         self.pet_controller
             .on_event(event, &self.config.pet, self.mood);
+    }
+
+    /// Clicks, hover and drags on Rusty's sprite still drive his animations.
+    fn react_to_rusty(&mut self, resp: &egui::Response, time: f64) {
+        if resp.hovered() {
+            self.pet_behavior.record_activity(time);
+            self.pet_controller
+                .on_event(PetEvent::UserHovered, &self.config.pet, self.mood);
+        }
+        if resp.drag_started() {
+            self.emit_pet_event(PetEvent::UserDragged);
+        }
+        if resp.clicked() && !resp.dragged() {
+            self.emit_pet_event(PetEvent::UserClicked);
+        }
     }
 
     /// All subsystems use one short-lived failure/recovery policy. Successful
@@ -2115,9 +2141,8 @@ impl RustyDeskApp {
             }
             ToolEffect::WindowStatus => {
                 let mode = match self.window_mode {
-                    WindowMode::Expanded => "ventana principal",
+                    WindowMode::Expanded | WindowMode::Pet => "ventana principal",
                     WindowMode::Island => "isla",
-                    WindowMode::Pet => "mascota",
                 };
                 let island = format!("{:?}", self.island_sm.visibility);
                 Ok(format!(
@@ -2165,26 +2190,6 @@ impl RustyDeskApp {
         }
     }
 
-    fn toggle_pomodoro_action(&mut self) {
-        let out = ToolEngine::execute(
-            ToolRequest {
-                tool_name: "pause_pomodoro".to_string(),
-                args: serde_json::json!({}),
-                source: ExecutionSource::Ui,
-                conversation_id: None,
-                tool_call_id: None,
-                approved_confirmation_token: None,
-            },
-            &mut self.data,
-            &mut self.organizer,
-            &self.config,
-        );
-        if let Some(m) = out.mood {
-            self.mood = m;
-        }
-        self.emit_pet_event_for_tool("pause_pomodoro", &out.status);
-    }
-
     fn island_expanded_size(&self, music_active: bool) -> [f32; 2] {
         if music_active {
             [440.0, if self.island_music_open { 170.0 } else { 100.0 }]
@@ -2194,14 +2199,7 @@ impl RustyDeskApp {
     }
 
     fn set_window_mode(&mut self, ctx: &egui::Context, target: WindowMode) {
-        if self.window_mode == WindowMode::Pet && target != WindowMode::Pet {
-            if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-                self.config.pet.pet_pos = Some([outer.min.x, outer.min.y]);
-                let _ = self.config.save();
-            }
-            self.pet_drag_origin = None;
-            self.pet_dragging = false;
-        }
+        let target = startup_window_mode(target);
         if self.window_mode == WindowMode::Island && target != WindowMode::Island {
             if self.config.island_position == IslandPosition::Custom
                 && self.config.island_remember_position
@@ -2213,12 +2211,6 @@ impl RustyDeskApp {
             self.island_dragging = false;
         }
 
-        let target = if target == WindowMode::Pet && !self.config.pet.enabled {
-            WindowMode::Island
-        } else {
-            target
-        };
-
         self.window_mode = target;
         if self.config.window_mode != target {
             self.config.window_mode = target;
@@ -2226,24 +2218,20 @@ impl RustyDeskApp {
         }
         let music_active = self.music_player.is_active();
         let (min_size, size) = match target {
-            WindowMode::Expanded => (Vec2::new(320.0, 360.0), Vec2::new(450.0, 650.0)),
+            WindowMode::Expanded | WindowMode::Pet => {
+                (Vec2::new(320.0, 360.0), Vec2::new(450.0, 650.0))
+            }
             WindowMode::Island => {
                 self.island_sm.reset_visible();
                 let s = self.island_expanded_size(music_active);
                 (Vec2::new(10.0, 10.0), Vec2::from(s))
             }
-            WindowMode::Pet => {
-                let s = self.config.pet.size.pixels();
-                (Vec2::new(64.0, 64.0), Vec2::splat(s))
-            }
         };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_size));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
 
-        let want_on_top = match target {
-            WindowMode::Pet => self.config.pet.always_on_top,
-            _ => self.always_on_top,
-        };
+        let want_on_top = self.always_on_top;
         let level = if want_on_top {
             egui::WindowLevel::AlwaysOnTop
         } else {
@@ -2253,18 +2241,6 @@ impl RustyDeskApp {
         apply_platform_always_on_top(want_on_top);
 
         match target {
-            WindowMode::Pet => {
-                if let Some(pos) = self.config.pet.pet_pos {
-                    let clamped = clamp_pet_position(
-                        pos,
-                        self.config.pet.size.pixels(),
-                        Some(self.current_monitor.as_tuple()),
-                    );
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(Pos2::new(
-                        clamped[0], clamped[1],
-                    )));
-                }
-            }
             WindowMode::Island => {
                 if self.session_kind != SessionKind::Wayland {
                     if let Some(pos) = crate::config::compute_island_position(
@@ -2283,7 +2259,7 @@ impl RustyDeskApp {
                     }
                 }
             }
-            WindowMode::Expanded => {
+            WindowMode::Expanded | WindowMode::Pet => {
                 if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
                     let pos = [outer.min.x, outer.min.y];
                     let clamped = clamp_window_position(
@@ -2373,7 +2349,7 @@ impl eframe::App for RustyDeskApp {
             // Normal clicks on Rusty's sprite must not force a mode change.
             if !minimized && !pointer_inside && (restored || activated) {
                 match self.window_mode {
-                    WindowMode::Pet => self.set_window_mode(ctx, WindowMode::Island),
+                    WindowMode::Pet => self.set_window_mode(ctx, WindowMode::Expanded),
                     WindowMode::Island if self.island_sm.visibility == IslandVisibility::Hidden => {
                         self.island_sm.reset_visible();
                         self.island_sm.invalidate_geometry();
@@ -2484,20 +2460,6 @@ impl eframe::App for RustyDeskApp {
 
         let outer_frame = egui::Frame::none().fill(Color32::TRANSPARENT);
 
-        if self.window_mode == WindowMode::Pet {
-            let mut is_hovered = false;
-            egui::CentralPanel::default()
-                .frame(outer_frame)
-                .show(ctx, |ui| {
-                    is_hovered = self.render_pet_mode(ui, ctx, time, pointer_pos, &pet_frame);
-                });
-            let repaint_ms = self
-                .pet_controller
-                .recommended_repaint_ms(is_hovered, &self.config.pet);
-            ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
-            return;
-        }
-
         if self.window_mode == WindowMode::Island {
             let expanded_size = self.island_expanded_size(music_active);
             let (pointer_in_window, is_interacting, has_open_menu) = (
@@ -2589,10 +2551,17 @@ impl eframe::App for RustyDeskApp {
             .frame(outer_frame)
             .show(ctx, |ui| {
                 let viewport = ui.max_rect().intersect(ui.clip_rect());
-                let island_frame = console_frame(14.0, 10.0);
+                // Window mode is a layered window so the bezel corners can be
+                // transparent. The interior fill has to be opaque or Windows
+                // composites the desktop through alpha 248.
+                let island_frame = console_frame(14.0, 10.0).fill(NIGHT);
 
                 island_frame.show(ui, |ui| {
-                    ui.set_min_height(ui.available_height().max(0.0));
+                    let cover = Vec2::new(
+                        finite_ui_length(ui.available_width(), 0.0),
+                        finite_ui_length(ui.available_height(), 0.0),
+                    );
+                    ui.set_min_size(cover);
 
                     if self.window_mode == WindowMode::Island {
                         self.render_compact_island(ui, ctx, pointer_pos, accent, &pet_frame);
@@ -2614,18 +2583,14 @@ impl eframe::App for RustyDeskApp {
                             {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
-                            if self.config.pet.enabled
-                                && pixel_button(
-                                    ui,
-                                    PixelIcon::Pet,
-                                    "",
-                                    BUTTON,
-                                    IVORY,
-                                    "Cambiar a modo Mascota",
-                                )
-                                .clicked()
-                            {
-                                self.set_window_mode(ctx, WindowMode::Pet);
+                            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                            let (max_icon, max_tip) = if maximized {
+                                (PixelIcon::Compact, "Restaurar tamaño")
+                            } else {
+                                (PixelIcon::Expand, "Maximizar")
+                            };
+                            if pixel_button(ui, max_icon, "", BUTTON, IVORY, max_tip).clicked() {
+                                self.toggle_maximized(ctx);
                             }
                             if pixel_button(
                                 ui,
@@ -2715,7 +2680,8 @@ impl eframe::App for RustyDeskApp {
                                     });
                                 },
                             );
-                            let _ = self.handle_drag(ui, ctx, drag_area.response.rect);
+                            let drag_resp = self.handle_drag(ui, ctx, drag_area.response.rect);
+                            self.react_to_rusty(&drag_resp, time);
                         });
                     });
 
@@ -2856,138 +2822,28 @@ impl eframe::App for RustyDeskApp {
 }
 
 impl RustyDeskApp {
-    fn render_pet_mode(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        time: f64,
-        pointer_pos: Option<Pos2>,
-        frame: &AnimationFrame,
-    ) -> bool {
-        let size = self.config.pet.size.pixels();
-        let look = if self.config.pet.follow_cursor {
-            pointer_pos
-        } else {
-            None
-        };
-
-        let resp = PetRenderer::render(
-            ui,
-            size,
-            frame,
-            self.config.pet.reduce_animations,
-            look,
-            self.config.pet.follow_cursor,
-        );
-
-        if resp.hovered() {
-            self.pet_behavior.record_activity(time);
-            self.pet_controller
-                .on_event(PetEvent::UserHovered, &self.config.pet, self.mood);
-        }
-
-        // Distinguish short click (> open Island) from drag (>5px threshold)
-        if resp.is_pointer_button_down_on() && ctx.input(|i| i.pointer.primary_down()) {
-            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                match self.pet_drag_origin {
-                    None => {
-                        self.pet_drag_origin = Some(pos);
-                        self.pet_dragging = false;
-                    }
-                    Some(origin) => {
-                        if !self.pet_dragging && origin.distance(pos) > 5.0 {
-                            self.pet_dragging = true;
-                            self.emit_pet_event(PetEvent::UserDragged);
-                            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                        }
-                    }
-                }
+    fn toggle_maximized(&mut self, ctx: &egui::Context) {
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        let current = ctx
+            .input(|i| {
+                i.viewport()
+                    .inner_rect
+                    .map(|rect| [rect.width(), rect.height()])
+            })
+            .unwrap_or(crate::ui::layout::EXPANDED_FALLBACK_SIZE);
+        match maximize_step(maximized, current, self.restore_inner_size) {
+            MaximizeStep::Maximize { restore_size } => {
+                self.restore_inner_size = Some(restore_size);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            }
+            MaximizeStep::Restore { size } => {
+                self.restore_inner_size = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
+                    size[0], size[1],
+                )));
             }
         }
-
-        if ctx.input(|i| i.pointer.primary_released()) {
-            if self.pet_dragging {
-                if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-                    self.config.pet.pet_pos = Some([outer.min.x, outer.min.y]);
-                    let _ = self.config.save();
-                }
-            }
-            self.pet_drag_origin = None;
-            self.pet_dragging = false;
-        }
-
-        if resp.clicked() && !self.pet_dragging {
-            self.emit_pet_event(PetEvent::UserClicked);
-        }
-        // Single-click is now a playful interaction. Keep Island accessible
-        // through a double-click and the existing right-click context menu.
-        if resp.double_clicked() && !self.pet_dragging {
-            self.set_window_mode(ctx, WindowMode::Island);
-        }
-
-        resp.context_menu(|ui| {
-            ui.set_min_width(170.0);
-            if ui.button("Abrir asistente").clicked() {
-                self.set_window_mode(ctx, WindowMode::Expanded);
-                ui.close_menu();
-            }
-            if ui.button("Abrir Isla").clicked() {
-                self.set_window_mode(ctx, WindowMode::Island);
-                ui.close_menu();
-            }
-            let pomo_label = if self.data.pomodoro.running {
-                "Pausar Pomodoro"
-            } else {
-                "Iniciar Pomodoro"
-            };
-            if ui.button(pomo_label).clicked() {
-                self.toggle_pomodoro_action();
-                ui.close_menu();
-            }
-            if ui.button("Configuración").clicked() {
-                self.active_tab = ActiveTab::Settings;
-                self.set_window_mode(ctx, WindowMode::Expanded);
-                ui.close_menu();
-            }
-            if self.music_player.is_active() {
-                ui.separator();
-                ui.label(
-                    RichText::new(format!("♫ {}", self.current_music_title()))
-                        .size(11.5)
-                        .strong(),
-                );
-                ui.horizontal(|ui| {
-                    let pause_lbl = if self.music_player.is_paused() {
-                        "Reanudar"
-                    } else {
-                        "Pausar"
-                    };
-                    if ui
-                        .add_enabled(!cfg!(windows), egui::Button::new(pause_lbl))
-                        .clicked()
-                    {
-                        self.music_player.toggle_pause();
-                    }
-                    if ui.small_button("Detener").clicked() {
-                        self.stop_music();
-                    }
-                });
-                self.render_volume_controls(ui, 90.0, true);
-            }
-            ui.separator();
-            if ui.button("Ocultar mascota").clicked() {
-                self.config.pet.enabled = false;
-                let _ = self.config.save();
-                self.set_window_mode(ctx, WindowMode::Island);
-                ui.close_menu();
-            }
-            if ui.button("Cerrar rusty-desk").clicked() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                ui.close_menu();
-            }
-        });
-
-        resp.hovered()
     }
 
     fn render_island_hidden_tab(
@@ -3103,6 +2959,7 @@ impl RustyDeskApp {
                     );
                 });
                 let drag_resp = self.handle_drag(ui, ctx, drag_area.response.rect);
+                self.react_to_rusty(&drag_resp, self.last_frame_time);
                 if drag_resp.double_clicked() && !drag_resp.dragged() {
                     self.set_window_mode(ctx, WindowMode::Expanded);
                 }
@@ -3119,19 +2976,6 @@ impl RustyDeskApp {
                     .clicked()
                     {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                    if self.config.pet.enabled
-                        && pixel_button(
-                            ui,
-                            PixelIcon::Pet,
-                            "",
-                            BUTTON,
-                            IVORY,
-                            "Cambiar a modo Mascota",
-                        )
-                        .clicked()
-                    {
-                        self.set_window_mode(ctx, WindowMode::Pet);
                     }
                     if pixel_button(ui, PixelIcon::Expand, "", BUTTON, IVORY, "Expandir panel")
                         .clicked()
@@ -3242,6 +3086,8 @@ impl RustyDeskApp {
                 .rounding(0.0)
                 .inner_margin(8.0)
                 .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     ui.label(
                         RichText::new("Soltá el archivo acá para enviárselo a Rusty (MarkItDown)")
                             .color(accent)
@@ -3251,6 +3097,67 @@ impl RustyDeskApp {
             ui.add_space(6.0);
         }
 
+        let content_rect = ui.available_rect_before_wrap();
+        let content_width = finite_ui_length(content_rect.width(), 0.0);
+        let content_height = finite_ui_length(content_rect.height(), 0.0);
+        let (content_rect, _) = ui.allocate_exact_size(
+            Vec2::new(content_width, content_height),
+            egui::Sense::hover(),
+        );
+        ui.painter().rect_filled(content_rect, 0.0, NIGHT);
+        if !self.show_news_inbox {
+            self.history = history_after_resize(self.history, content_rect.width());
+        }
+        let pane = if self.show_news_inbox {
+            HistoryPane::Closed
+        } else {
+            self.history.pane
+        };
+        let regions = chat_regions(
+            LogicalRect {
+                x: content_rect.min.x,
+                y: content_rect.min.y,
+                w: content_rect.width(),
+                h: content_rect.height(),
+            },
+            pane,
+        );
+        if let Some(sidebar) = regions.sidebar {
+            self.paint_in_rect(ui, logical_rect(sidebar), |app, ui| {
+                app.render_history_sidebar(ui, accent);
+            });
+        }
+        let column_width = content_rect.width();
+        self.paint_in_rect(ui, logical_rect(regions.column), |app, ui| {
+            app.render_chat_column(ui, ctx, accent, column_width);
+        });
+    }
+
+    fn paint_in_rect(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        body: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
+                ui.set_clip_rect(rect);
+                ui.set_width(rect.width().max(0.0));
+                body(self, ui);
+            },
+        );
+    }
+
+    fn render_chat_column(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        accent: Color32,
+        content_width: f32,
+    ) {
         ui.horizontal_wrapped(|ui| {
             if pixel_button(
                 ui,
@@ -3267,15 +3174,21 @@ impl RustyDeskApp {
 
             let total_chats = self.data.count_conversations().unwrap_or(0);
             let hist_label = format!("Historial ({total_chats})");
-            let hist_fill = if self.show_chat_history {
+            let history_open = self.history.pane != HistoryPane::Closed && !self.show_news_inbox;
+            let hist_fill = if history_open {
                 accent
             } else {
                 Color32::from_rgb(30, 41, 59)
             };
-            let hist_text = if self.show_chat_history {
+            let hist_text = if history_open {
                 Color32::from_rgb(15, 20, 32)
             } else {
                 Color32::WHITE
+            };
+            let hist_tip = if history_open {
+                "Ocultar historial"
+            } else {
+                "Abrir historial"
             };
             if pixel_button(
                 ui,
@@ -3283,12 +3196,12 @@ impl RustyDeskApp {
                 &hist_label,
                 hist_fill,
                 hist_text,
-                "Ver historial de chats guardados",
+                hist_tip,
             )
             .clicked()
             {
-                self.show_chat_history = !self.show_chat_history;
                 self.show_news_inbox = false;
+                self.history = toggle_history(self.history, content_width);
             }
 
             let unread = self.news_jobs.iter().filter(|job| job.unread).count();
@@ -3318,7 +3231,6 @@ impl RustyDeskApp {
             .clicked()
             {
                 self.show_news_inbox = !self.show_news_inbox;
-                self.show_chat_history = false;
             }
 
             for (label, cmd) in [
@@ -3339,7 +3251,9 @@ impl RustyDeskApp {
         if self.show_news_inbox {
             egui::ScrollArea::vertical()
                 .id_salt("chat_news_inbox")
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
                     self.render_scheduled_news(ui);
                 });
             return;
@@ -3357,6 +3271,8 @@ impl RustyDeskApp {
                 .rounding(0.0)
                 .inner_margin(8.0)
                 .show(ui, |ui| {
+                    ui.set_max_width(ui.available_width());
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     ui.label(
                         RichText::new(format!("Confirmación requerida: {}", pending.summary))
                             .strong()
@@ -3364,7 +3280,7 @@ impl RustyDeskApp {
                             .color(Color32::from_rgb(250, 204, 21)),
                     );
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if pixel_button(
                             ui,
                             PixelIcon::Check,
@@ -3394,99 +3310,8 @@ impl RustyDeskApp {
             ui.add_space(6.0);
         }
 
-        if self.show_chat_history {
-            const PAGE_SIZE: usize = 15;
-            let total = self.data.count_conversations().unwrap_or(0);
-            let max_page = total.saturating_sub(1) / PAGE_SIZE;
-            if self.history_page > max_page {
-                self.history_page = max_page;
-            }
-            let sessions = self
-                .data
-                .list_conversations_page(PAGE_SIZE, self.history_page * PAGE_SIZE)
-                .unwrap_or_default();
-
-            egui::Frame::none()
-                .fill(Color32::from_rgb(18, 25, 40))
-                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(51, 65, 85)))
-                .rounding(0.0)
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Chats guardados").strong().size(12.0));
-                        if total > PAGE_SIZE {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if self.history_page < max_page
-                                        && ui.small_button(">").clicked()
-                                    {
-                                        self.history_page += 1;
-                                    }
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "Pág {}/{}",
-                                            self.history_page + 1,
-                                            max_page + 1
-                                        ))
-                                        .size(11.0)
-                                        .color(Color32::GRAY),
-                                    );
-                                    if self.history_page > 0 && ui.small_button("<").clicked() {
-                                        self.history_page -= 1;
-                                    }
-                                },
-                            );
-                        }
-                    });
-                    ui.add_space(4.0);
-                    if sessions.is_empty() {
-                        ui.label(
-                            RichText::new("Todavía no hay chats guardados.")
-                                .size(11.5)
-                                .color(Color32::GRAY),
-                        );
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .id_salt("chat_history_scroll")
-                            .max_height(150.0)
-                            .show(ui, |ui| {
-                                for s in sessions {
-                                    let is_current = s.id == self.current_chat_id;
-                                    let local_dt = format_local_datetime_from_utc(&s.updated_at);
-                                    ui.horizontal(|ui| {
-                                        let label = format!("{}  ({})", s.title, local_dt);
-                                        let btn = egui::Button::new(
-                                            RichText::new(label).size(11.5).color(if is_current {
-                                                accent
-                                            } else {
-                                                Color32::WHITE
-                                            }),
-                                        )
-                                        .fill(Color32::from_rgb(26, 35, 52))
-                                        .rounding(0.0);
-                                        if ui.add(btn).clicked() {
-                                            self.load_chat_session(s.clone());
-                                        }
-                                        if pixel_button(
-                                            ui,
-                                            PixelIcon::Clear,
-                                            "",
-                                            Color32::from_rgb(127, 29, 29),
-                                            Color32::WHITE,
-                                            "Eliminar chat del historial",
-                                        )
-                                        .clicked()
-                                        {
-                                            let r = self.data.delete_conversation(&s.id);
-                                            self.report_persistence_result(r);
-                                        }
-                                    });
-                                    ui.add_space(3.0);
-                                }
-                            });
-                    }
-                });
+        if self.history.pane == HistoryPane::Inline {
+            self.render_saved_chats(ui, accent, false);
             ui.add_space(6.0);
         }
 
@@ -3511,180 +3336,413 @@ impl RustyDeskApp {
                 usage.input, usage.output
             ));
         }
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
         ui.label(
             RichText::new(format!("Tokens · Turno {turn} · Sesión {session}"))
                 .size(11.0)
                 .color(retro::MUTED),
         )
         .on_hover_text(details);
+        ui.add_space(4.0);
 
-        let composer_margin = egui::Margin::symmetric(12.0, 10.0);
-        let composer_row_height = 28.0;
-        let composer_height = composer_margin.sum().y + composer_row_height;
-        let available_h =
-            (ui.available_height() - composer_height - ui.spacing().item_spacing.y).max(0.0);
-        egui::ScrollArea::vertical()
-            .max_height(available_h)
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for entry in &self.chat_ui {
-                    let (bg, border, align) = if entry.is_user {
-                        (
-                            Color32::from_rgb(42, 32, 16),
-                            retro::GOLD_DARK,
-                            egui::Align::RIGHT,
-                        )
-                    } else {
-                        (retro::PANEL, retro::BORDER, egui::Align::LEFT)
-                    };
-                    ui.with_layout(egui::Layout::top_down(align), |ui| {
-                        egui::Frame::none()
-                            .fill(bg)
-                            .stroke(Stroke::new(1.0_f32, border))
-                            .rounding(0.0)
-                            .inner_margin(9.0)
-                            .show(ui, |ui| {
-                                ui.set_max_width(330.0);
-                                if entry.is_user {
-                                    ui.label(&entry.text);
-                                } else {
-                                    CommonMarkViewer::new().show(
-                                        ui,
-                                        &mut self.chat_markdown_cache,
-                                        &entry.text,
-                                    );
-                                }
-                                let timestamp = RichText::new(&entry.timestamp)
-                                    .size(10.0)
-                                    .color(Color32::from_gray(150));
-                                if entry.is_user {
-                                    ui.label(timestamp);
-                                } else {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(timestamp);
-                                        if ui
-                                            .small_button("Copiar")
-                                            .on_hover_text(
-                                                "Copiar la respuesta completa en Markdown",
-                                            )
-                                            .clicked()
-                                        {
-                                            ctx.copy_text(entry.text.clone());
-                                        }
-                                    });
-                                }
-                            });
-                    });
-                    ui.add_space(6.0);
-                }
-            });
-
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            egui::Frame::none()
-                .fill(Color32::from_rgb(24, 31, 48))
-                .rounding(0.0)
-                .inner_margin(composer_margin)
+        let rest = ui.available_rect_before_wrap();
+        let split = split_scroll_and_composer(
+            LogicalRect {
+                x: rest.min.x,
+                y: rest.min.y,
+                w: finite_ui_length(rest.width(), 0.0),
+                h: finite_ui_length(rest.height(), 0.0),
+            },
+            composer_block_height(finite_ui_length(rest.width(), 0.0)),
+            6.0,
+        );
+        self.paint_in_rect(ui, logical_rect(split.scroll), |app, ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("chat_messages")
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        let (mic_text, mic_bg) = if self.active_recording.is_some() {
-                            ("Parar", Color32::from_rgb(190, 18, 60))
-                        } else {
-                            ("Voz", Color32::from_rgb(30, 41, 59))
-                        };
-                        if pixel_button(
-                            ui,
-                            PixelIcon::Mic,
-                            mic_text,
-                            mic_bg,
-                            Color32::WHITE,
-                            "Grabar voz",
-                        )
-                        .clicked()
-                        {
-                            self.toggle_voice_recording(ctx);
-                        }
-                        if pixel_button(
-                            ui,
-                            PixelIcon::Attach,
-                            "",
-                            Color32::from_rgb(30, 41, 59),
-                            Color32::WHITE,
-                            "Adjuntar archivo para MarkItDown",
-                        )
-                        .clicked()
-                        {
-                            self.spawn_file_picker(true, ctx);
-                        }
-
-                        let (send_icon, send_label, send_fill, send_fg) = if self.is_thinking {
-                            (
-                                PixelIcon::Close,
-                                "Cancelar",
-                                Color32::from_rgb(153, 27, 27),
-                                Color32::WHITE,
-                            )
-                        } else {
-                            (
-                                PixelIcon::Send,
-                                "Enviar",
-                                accent,
-                                Color32::from_rgb(15, 20, 32),
-                            )
-                        };
-
-                        let (action_clicked, enter_pressed) = ui
-                            .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let action_clicked = pixel_button(
-                                    ui,
-                                    send_icon,
-                                    send_label,
-                                    send_fill,
-                                    send_fg,
-                                    if self.is_thinking {
-                                        "Cancelar respuesta"
-                                    } else {
-                                        "Enviar mensaje · Enter"
-                                    },
-                                )
-                                .clicked();
-
-                                let input = ui.add_sized(
-                                    [ui.available_width(), composer_row_height],
-                                    egui::TextEdit::singleline(&mut self.chat_input)
-                                        .frame(false)
-                                        .hint_text("Escribí una orden o pregunta..."),
-                                );
-                                let enter_pressed = input.lost_focus()
-                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                (action_clicked, enter_pressed)
-                            })
-                            .inner;
-
-                        if action_clicked {
-                            if self.is_thinking {
-                                self.invalidate_chat_turn();
-                                self.is_thinking = false;
-                                self.mood = AssistantMood::Idle;
-                                self.chat_ui
-                                    .push(UiChatEntry::assistant("Solicitud cancelada."));
-                            } else if self.pending_confirmations.is_empty()
-                                && !self.chat_input.trim().is_empty()
-                            {
-                                let msg = std::mem::take(&mut self.chat_input);
-                                self.send_user_message(msg, ctx);
-                            }
-                        } else if enter_pressed
-                            && !self.is_thinking
-                            && self.pending_confirmations.is_empty()
-                            && !self.chat_input.trim().is_empty()
-                        {
-                            let msg = std::mem::take(&mut self.chat_input);
-                            self.send_user_message(msg, ctx);
-                        }
-                    });
+                    ui.set_width(ui.available_width().max(0.0));
+                    app.render_chat_messages(ui, ctx);
                 });
         });
+        self.paint_in_rect(ui, logical_rect(split.composer), |app, ui| {
+            app.render_composer(ui, ctx, accent);
+        });
+    }
+
+    fn render_history_sidebar(&mut self, ui: &mut egui::Ui, accent: Color32) {
+        egui::Frame::none()
+            .fill(Color32::from_rgb(18, 25, 40))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(51, 65, 85)))
+            .rounding(0.0)
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_height(ui.available_height().max(0.0));
+                ui.set_max_width(ui.available_width());
+                self.render_saved_chats(ui, accent, true);
+            });
+    }
+
+    fn render_saved_chats(&mut self, ui: &mut egui::Ui, accent: Color32, docked: bool) {
+        const PAGE_SIZE: usize = 15;
+        let total = self.data.count_conversations().unwrap_or(0);
+        let max_page = total.saturating_sub(1) / PAGE_SIZE;
+        if self.history_page > max_page {
+            self.history_page = max_page;
+        }
+        let sessions = self
+            .data
+            .list_conversations_page(PAGE_SIZE, self.history_page * PAGE_SIZE)
+            .unwrap_or_default();
+
+        let body = |ui: &mut egui::Ui| {
+            ui.set_max_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Chats guardados").strong().size(12.0));
+                if total > PAGE_SIZE {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.history_page < max_page && ui.small_button(">").clicked() {
+                            self.history_page += 1;
+                        }
+                        ui.label(
+                            RichText::new(format!(
+                                "Pág {}/{}",
+                                self.history_page + 1,
+                                max_page + 1
+                            ))
+                            .size(11.0)
+                            .color(Color32::GRAY),
+                        );
+                        if self.history_page > 0 && ui.small_button("<").clicked() {
+                            self.history_page -= 1;
+                        }
+                    });
+                }
+            });
+            ui.add_space(4.0);
+            if sessions.is_empty() {
+                ui.label(
+                    RichText::new("Todavía no hay chats guardados.")
+                        .size(11.5)
+                        .color(Color32::GRAY),
+                );
+            } else {
+                let scroll = egui::ScrollArea::vertical().id_salt(if docked {
+                    "chat_history_sidebar"
+                } else {
+                    "chat_history_inline"
+                });
+                let scroll = if docked {
+                    scroll.auto_shrink([false, false])
+                } else {
+                    scroll.max_height(150.0)
+                };
+                scroll.show(ui, |ui| {
+                    let bar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
+                    let row_width = history_row_content_width(ui.available_width(), bar);
+                    ui.set_width(row_width);
+                    for s in sessions {
+                        let is_current = s.id == self.current_chat_id;
+                        let local_dt = format_local_datetime_from_utc(&s.updated_at);
+                        let row =
+                            history_row_layout(row_width, HISTORY_DELETE_WIDTH, HISTORY_ROW_GAP);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = HISTORY_ROW_GAP;
+                            let chars = ((row.title_width / 7.0) as usize).clamp(4, 64);
+                            let label =
+                                truncate_chars(&format!("{}  ({})", s.title, local_dt), chars);
+                            let open = ui
+                                .add_sized(
+                                    [row.title_width, 26.0],
+                                    egui::Button::new(
+                                        RichText::new(label).size(11.5).color(if is_current {
+                                            accent
+                                        } else {
+                                            Color32::WHITE
+                                        }),
+                                    )
+                                    .fill(Color32::from_rgb(26, 35, 52))
+                                    .rounding(0.0),
+                                )
+                                .clicked();
+                            let delete = pixel_button(
+                                ui,
+                                PixelIcon::Clear,
+                                "",
+                                Color32::from_rgb(127, 29, 29),
+                                Color32::WHITE,
+                                "Eliminar chat del historial",
+                            )
+                            .clicked();
+                            if open {
+                                self.load_chat_session(s.clone());
+                            }
+                            if delete {
+                                let r = self.data.delete_conversation(&s.id);
+                                self.report_persistence_result(r);
+                            }
+                        });
+                        ui.add_space(3.0);
+                    }
+                });
+            }
+        };
+
+        if docked {
+            body(ui);
+        } else {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(18, 25, 40))
+                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(51, 65, 85)))
+                .rounding(0.0)
+                .inner_margin(8.0)
+                .show(ui, body);
+        }
+    }
+
+    fn render_chat_messages(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let count = self.chat_ui.len();
+        for index in 0..count {
+            let is_user = self.chat_ui[index].is_user;
+            let text = self.chat_ui[index].text.clone();
+            let timestamp = self.chat_ui[index].timestamp.clone();
+            let (bg, border, align) = if is_user {
+                (
+                    Color32::from_rgb(42, 32, 16),
+                    retro::GOLD_DARK,
+                    egui::Align::RIGHT,
+                )
+            } else {
+                (retro::PANEL, retro::BORDER, egui::Align::LEFT)
+            };
+            ui.with_layout(egui::Layout::top_down(align), |ui| {
+                let outer = ui.available_width();
+                egui::Frame::none()
+                    .fill(bg)
+                    .stroke(Stroke::new(1.0_f32, border))
+                    .rounding(0.0)
+                    .inner_margin(BUBBLE_INNER_MARGIN)
+                    .show(ui, |ui| {
+                        let text_w =
+                            bubble_text_width(outer, BUBBLE_INNER_MARGIN).min(ui.available_width());
+                        ui.set_width(text_w);
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        if is_user {
+                            ui.label(&text);
+                        } else {
+                            self.render_assistant_markdown(ui, index, text_w, &text);
+                        }
+                        let stamp = RichText::new(&timestamp)
+                            .size(10.0)
+                            .color(Color32::from_gray(150));
+                        if is_user {
+                            ui.label(stamp);
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(stamp);
+                                if ui
+                                    .small_button("Copiar")
+                                    .on_hover_text("Copiar la respuesta completa en Markdown")
+                                    .clicked()
+                                {
+                                    ctx.copy_text(text.clone());
+                                }
+                            });
+                        }
+                    });
+            });
+            ui.add_space(6.0);
+        }
+    }
+
+    fn render_assistant_markdown(
+        &mut self,
+        ui: &mut egui::Ui,
+        message_index: usize,
+        text_w: f32,
+        text: &str,
+    ) {
+        for (block_index, block) in split_fenced_blocks(text).into_iter().enumerate() {
+            match block {
+                MarkdownBlock::Prose(prose) => {
+                    if prose.trim().is_empty() {
+                        continue;
+                    }
+                    ui.set_max_width(text_w.min(ui.available_width()));
+                    CommonMarkViewer::new().show(ui, &mut self.chat_markdown_cache, prose);
+                }
+                MarkdownBlock::Code { body, .. } => {
+                    let width = text_w.min(ui.available_width()).max(0.0);
+                    ui.set_max_width(width);
+                    egui::Frame::none()
+                        .fill(retro::FIELD)
+                        .stroke(Stroke::new(1.0_f32, retro::BORDER))
+                        .rounding(0.0)
+                        .inner_margin(6.0)
+                        .show(ui, |ui| {
+                            ui.set_width((width - 12.0).max(0.0));
+                            egui::ScrollArea::horizontal()
+                                .id_salt(("chat_code", message_index, block_index))
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(body.trim_end_matches('\n'))
+                                                .monospace()
+                                                .size(12.0)
+                                                .color(IVORY),
+                                        )
+                                        .wrap_mode(egui::TextWrapMode::Extend),
+                                    );
+                                });
+                        });
+                    ui.add_space(4.0);
+                }
+            }
+        }
+    }
+
+    fn render_composer(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, accent: Color32) {
+        let composer_margin = egui::Margin::symmetric(12.0, 10.0);
+        let composer_row_height = 28.0;
+        egui::Frame::none()
+            .fill(Color32::from_rgb(24, 31, 48))
+            .rounding(0.0)
+            .inner_margin(composer_margin)
+            .show(ui, |ui| {
+                let inner_w = ui.available_width().max(0.0);
+                ui.set_min_width(inner_w);
+                ui.set_max_width(inner_w);
+                let wrap = composer_wraps(inner_w);
+                let (action_clicked, enter_pressed) = if wrap {
+                    let input = ui.add_sized(
+                        [inner_w, composer_row_height],
+                        egui::TextEdit::singleline(&mut self.chat_input)
+                            .frame(false)
+                            .hint_text("Escribí una orden o pregunta..."),
+                    );
+                    let enter_pressed =
+                        input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_space(6.0);
+                    let action_clicked = ui
+                        .horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            self.composer_side_tools(ui, ctx);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                self.composer_send_button(ui, accent)
+                            })
+                            .inner
+                        })
+                        .inner;
+                    (action_clicked, enter_pressed)
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        self.composer_side_tools(ui, ctx);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let action_clicked = self.composer_send_button(ui, accent);
+                            let input = ui.add_sized(
+                                [ui.available_width().max(0.0), composer_row_height],
+                                egui::TextEdit::singleline(&mut self.chat_input)
+                                    .frame(false)
+                                    .hint_text("Escribí una orden o pregunta..."),
+                            );
+                            let enter_pressed =
+                                input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            (action_clicked, enter_pressed)
+                        })
+                        .inner
+                    })
+                    .inner
+                };
+                self.submit_composer(action_clicked, enter_pressed, ctx);
+            });
+    }
+
+    fn composer_side_tools(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let (mic_text, mic_bg) = if self.active_recording.is_some() {
+            ("Parar", Color32::from_rgb(190, 18, 60))
+        } else {
+            ("Voz", Color32::from_rgb(30, 41, 59))
+        };
+        if pixel_button(
+            ui,
+            PixelIcon::Mic,
+            mic_text,
+            mic_bg,
+            Color32::WHITE,
+            "Grabar voz",
+        )
+        .clicked()
+        {
+            self.toggle_voice_recording(ctx);
+        }
+        if pixel_button(
+            ui,
+            PixelIcon::Attach,
+            "",
+            Color32::from_rgb(30, 41, 59),
+            Color32::WHITE,
+            "Adjuntar archivo para MarkItDown",
+        )
+        .clicked()
+        {
+            self.spawn_file_picker(true, ctx);
+        }
+    }
+
+    fn composer_send_button(&self, ui: &mut egui::Ui, accent: Color32) -> bool {
+        let (send_icon, send_label, send_fill, send_fg) = if self.is_thinking {
+            (
+                PixelIcon::Close,
+                "Cancelar",
+                Color32::from_rgb(153, 27, 27),
+                Color32::WHITE,
+            )
+        } else {
+            (
+                PixelIcon::Send,
+                "Enviar",
+                accent,
+                Color32::from_rgb(15, 20, 32),
+            )
+        };
+        pixel_button(
+            ui,
+            send_icon,
+            send_label,
+            send_fill,
+            send_fg,
+            if self.is_thinking {
+                "Cancelar respuesta"
+            } else {
+                "Enviar mensaje · Enter"
+            },
+        )
+        .clicked()
+    }
+
+    fn submit_composer(&mut self, action_clicked: bool, enter_pressed: bool, ctx: &egui::Context) {
+        if action_clicked {
+            if self.is_thinking {
+                self.invalidate_chat_turn();
+                self.is_thinking = false;
+                self.mood = AssistantMood::Idle;
+                self.chat_ui
+                    .push(UiChatEntry::assistant("Solicitud cancelada."));
+            } else if self.pending_confirmations.is_empty() && !self.chat_input.trim().is_empty() {
+                let msg = std::mem::take(&mut self.chat_input);
+                self.send_user_message(msg, ctx);
+            }
+        } else if enter_pressed
+            && !self.is_thinking
+            && self.pending_confirmations.is_empty()
+            && !self.chat_input.trim().is_empty()
+        {
+            let msg = std::mem::take(&mut self.chat_input);
+            self.send_user_message(msg, ctx);
+        }
     }
 
     fn render_tasks_tab(&mut self, ui: &mut egui::Ui) {
@@ -5808,7 +5866,7 @@ impl RustyDeskApp {
                         (SettingsSubTab::Ai, "IA y Audio"),
                         (SettingsSubTab::ExternalTools, "Herramientas"),
                         (SettingsSubTab::Position, "Posición e Isla"),
-                        (SettingsSubTab::Pet, "Mascota"),
+                        (SettingsSubTab::Pet, "Rusty"),
                         (SettingsSubTab::Dreaming, "Memoria"),
                     ] {
                         let selected = self.settings_sub_tab == tab;
@@ -6381,12 +6439,19 @@ impl RustyDeskApp {
     }
 
     fn render_settings_pet_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Mascota de escritorio").strong());
-        ui.checkbox(&mut self.config.pet.enabled, "Habilitar Modo Mascota");
-        ui.checkbox(
-            &mut self.config.pet.always_on_top,
-            "Mantener mascota siempre visible",
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+            paint_pixel_icon(ui.painter(), rect, PixelIcon::Pet, IVORY);
+            ui.label(RichText::new("Rusty").strong());
+        });
+        ui.label(
+            RichText::new(
+                "Rusty sigue en la ventana, la isla y el notch. Estas opciones cambian sus animaciones.",
+            )
+            .size(11.5)
+            .color(retro::MUTED),
         );
+        ui.add_space(4.0);
         ui.checkbox(
             &mut self.config.pet.follow_cursor,
             "Seguir el cursor con los ojos",
@@ -6405,13 +6470,6 @@ impl RustyDeskApp {
         );
 
         ui.horizontal(|ui| {
-            ui.label("Tamaño:");
-            for sz in [PetSize::Small, PetSize::Normal, PetSize::Large] {
-                ui.selectable_value(&mut self.config.pet.size, sz, sz.label());
-            }
-        });
-
-        ui.horizontal(|ui| {
             ui.label("Intensidad:");
             for level in [
                 PetIntensity::Subtle,
@@ -6425,10 +6483,6 @@ impl RustyDeskApp {
         ui.horizontal(|ui| {
             ui.label("Dormir tras (min, 0 = nunca):");
             ui.add(egui::DragValue::new(&mut self.config.pet.sleep_after_mins).range(0..=120));
-            if ui.small_button("Restablecer posición").clicked() {
-                self.config.pet.pet_pos = None;
-                self.show_status_banner("Posición de mascota restablecida.".to_string());
-            }
         });
     }
 }
@@ -6558,6 +6612,21 @@ fn playback_status(status: Option<String>) -> Result<String, String> {
         Some(text) if text.contains('⚠') => Err(text),
         Some(text) => Ok(text),
         None => Err("No pude cambiar de pista.".to_string()),
+    }
+}
+
+fn logical_rect(rect: crate::ui::layout::LogicalRect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::Pos2::new(rect.x, rect.y),
+        egui::Vec2::new(rect.w, rect.h),
+    )
+}
+
+fn finite_ui_length(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        fallback
     }
 }
 
@@ -6868,6 +6937,61 @@ mod text_tests {
         assert!(text
             .iter()
             .any(|part| part.contains("código") && !part.contains('`')));
+    }
+
+    #[test]
+    fn narrow_chat_keeps_bubbles_code_and_actions_inside_the_panel() {
+        fn collect_text<'a>(shape: &'a egui::Shape, text: &mut Vec<&'a str>) {
+            match shape {
+                egui::Shape::Text(shape) => text.push(&shape.galley.job.text),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text(shape, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let ctx = egui::Context::default();
+        let mut app = in_memory_app(&ctx);
+        let url = format!("https://example.com/{}", "segmento-largo/".repeat(12));
+        let code = format!("let valor = \"{}\";", "0123456789".repeat(12));
+        app.chat_ui = vec![
+            UiChatEntry::user(format!("Texto largo {url}")),
+            UiChatEntry::assistant(format!(
+                "Mirá [el enlace]({url}) y este bloque:\n\n```rust\n{code}\n```\n"
+            )),
+        ];
+        app.is_thinking = true;
+        let width = 320.0;
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(width, 640.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.render_chat_tab(ui, ctx, retro::CYAN);
+                });
+            },
+        );
+        let mut text = Vec::new();
+        for clipped in &output.shapes {
+            assert!(
+                clipped.clip_rect.min.x >= -1.0 && clipped.clip_rect.max.x <= width + 1.0,
+                "clip {:?} escapes the {width}px panel",
+                clipped.clip_rect
+            );
+            collect_text(&clipped.shape, &mut text);
+        }
+        assert!(text.iter().any(|part| part.contains("Cancelar")));
+        assert!(text.iter().any(|part| part.contains("Copiar")));
+        assert!(text.iter().any(|part| part.contains("segmento-largo")));
+        assert!(text.iter().any(|part| part.contains("let valor")));
     }
 
     #[test]
