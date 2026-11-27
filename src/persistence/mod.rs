@@ -101,6 +101,7 @@ pub struct ConversationSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageKind {
     Text,
+    Weather,
     ToolCall,
     ToolResult,
     ToolError,
@@ -110,6 +111,7 @@ impl MessageKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Text => "text",
+            Self::Weather => "weather",
             Self::ToolCall => "tool_call",
             Self::ToolResult => "tool_result",
             Self::ToolError => "tool_error",
@@ -118,6 +120,7 @@ impl MessageKind {
 
     pub fn from_str(s: &str) -> Self {
         match s {
+            "weather" => Self::Weather,
             "tool_call" => Self::ToolCall,
             "tool_result" => Self::ToolResult,
             "tool_error" => Self::ToolError,
@@ -493,6 +496,44 @@ impl Database {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn weather_reaction(
+        &self,
+        city: &str,
+    ) -> anyhow::Result<(Option<crate::weather::WeatherCondition>, i64)> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT condition, last_notice FROM weather_reactions WHERE city = ?1",
+                [city],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((condition, time)) = row else {
+            return Ok((None, 0));
+        };
+        Ok((
+            condition.and_then(|condition| serde_json::from_str(&condition).ok()),
+            time,
+        ))
+    }
+
+    pub fn save_weather_reaction(
+        &self,
+        city: &str,
+        condition: Option<crate::weather::WeatherCondition>,
+        last_notice: i64,
+    ) -> anyhow::Result<()> {
+        let condition = condition
+            .map(|condition| serde_json::to_string(&condition))
+            .transpose()?;
+        self.conn.execute(
+            "INSERT INTO weather_reactions(city, condition, last_notice) VALUES (?1, ?2, ?3)
+             ON CONFLICT(city) DO UPDATE SET condition = excluded.condition, last_notice = excluded.last_notice",
+            rusqlite::params![city, condition, last_notice],
+        )?;
+        Ok(())
     }
 
     pub fn save_pomodoro(&self, p: &PersistedPomodoro) -> anyhow::Result<()> {
@@ -1445,6 +1486,21 @@ mod tests {
     }
 
     #[test]
+    fn stores_weather_reactions_by_city_and_keeps_cooldown_after_clear() {
+        use crate::weather::WeatherCondition;
+        let db = Database::open_in_memory().unwrap();
+        db.save_weather_reaction("córdoba", Some(WeatherCondition::Wind), 42)
+            .unwrap();
+        assert_eq!(
+            db.weather_reaction("córdoba").unwrap(),
+            (Some(WeatherCondition::Wind), 42)
+        );
+        assert_eq!(db.weather_reaction("rosario").unwrap(), (None, 0));
+        db.save_weather_reaction("córdoba", None, 42).unwrap();
+        assert_eq!(db.weather_reaction("córdoba").unwrap(), (None, 42));
+    }
+
+    #[test]
     fn migrations_are_idempotent_and_dreaming_retrieval_ignores_tool_text() {
         let mut db = Database::open_in_memory().unwrap();
         let version: i64 = db
@@ -1453,7 +1509,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         migrations::run_migrations(&mut db.conn).unwrap();
         let count: i64 = db
             .conn
@@ -1461,7 +1517,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 9);
+        assert_eq!(count, 10);
 
         db.ensure_conversation("c1", "Chat").unwrap();
         let text = NewPersistedMessage {

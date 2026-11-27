@@ -1,5 +1,6 @@
 use crate::config::{PetConfig, PetIntensity};
 use crate::state::AssistantMood;
+use crate::weather::WeatherCondition;
 
 use super::events::{EmptySection, EventPriority, PetEvent};
 use super::motion::{MotionController, MotionPose};
@@ -178,6 +179,11 @@ impl AnimationController {
         self.state_duration = duration;
     }
 
+    pub fn can_react_to_weather(&self) -> bool {
+        self.state_duration.is_none()
+            && matches!(self.state, AnimationState::Idle | AnimationState::Happy)
+    }
+
     /// Processes a semantic event, respecting priority rules and user preferences.
     pub fn on_event(&mut self, event: PetEvent, config: &PetConfig, mood: AssistantMood) {
         // Remember recovery until a current error/celebration animation ends;
@@ -202,6 +208,21 @@ impl AnimationController {
         };
 
         match event {
+            PetEvent::WeatherChanged(condition) => {
+                if self.can_react_to_weather()
+                    && config.auto_animations
+                    && !config.reduce_animations
+                {
+                    use WeatherCondition::*;
+                    let state = match condition {
+                        Storm | Wind => AnimationState::WakeUp,
+                        Rain | RainSoon | Fog | Dust => AnimationState::LookAround,
+                        Heat | Cold | FrozenPrecipitation | Night | Cloudy => AnimationState::Blink,
+                        Daylight | Clear => AnimationState::LookAround,
+                    };
+                    self.transition(state, ev_prio, Some(0.9 * intensity_scale));
+                }
+            }
             PetEvent::UserClicked => {
                 if self.state == AnimationState::Sleep {
                     // A sleeping Rusty wakes on the first touch. It does not

@@ -569,13 +569,13 @@ pub fn all_tool_specs() -> Vec<ToolSpec> {
         ),
         spec(
             "get_weather",
-            "Consulta el clima actual y temperatura de una ciudad usando Open-Meteo (gratuito).",
+            "Consulta condiciones actuales y pronóstico por hora con Open-Meteo. Úsala para preguntas sobre lluvia, paraguas, viento, calor, frío, tormenta o polvo.",
             json!({
                 "type": "object",
                 "properties": {
-                    "city": { "type": "string", "description": "Nombre de la ciudad (ej: Buenos Aires, Córdoba, Madrid)" }
-                },
-                "required": ["city"]
+                    "city": { "type": "string", "description": "Ciudad solicitada. Omitila para usar la ciudad configurada en Rusty." },
+                    "hours": { "type": "integer", "minimum": 0, "maximum": 24, "description": "Horas futuras a devolver. 0 para condiciones actuales. Por defecto 12." }
+                }
             }),
             RiskLevel::Read,
             RiskTier::Low,
@@ -861,6 +861,16 @@ fn categories_for(user_text: &str) -> Vec<&'static str> {
         "temperatura",
         "lluvia",
         "llueve",
+        "paraguas",
+        "viento",
+        "ráfaga",
+        "rafaga",
+        "polvo",
+        "calidad del aire",
+        "tormenta",
+        "niebla",
+        "nieve",
+        "helada",
         "pronostico",
         "pronóstico",
         "weather",

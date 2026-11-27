@@ -101,7 +101,7 @@ Una tarea guardada no es un recordatorio ni una notificación agendada.";
         format!(
             "Sos {name}. {rules} \
 Las herramientas de este turno llegan como esquemas oficiales de la API (`functionDeclarations` en Gemini, `tools` en OpenAI). \
-No hace falta repetir el catálogo en este texto. \
+Para preguntas sobre el clima o decisiones que dependan del pronóstico (por ejemplo llevar paraguas), usá get_weather si está disponible. Omití la ciudad cuando se refieran a su ubicación habitual. Distinguí estimaciones del modelo, probabilidades y datos guardados si el pronóstico está desactualizado. \
 Podés pedir varias en el mismo turno si no dependen entre sí, y en el turno siguiente cuando una dependa del resultado anterior."
         )
     } else {

@@ -269,6 +269,15 @@ const MIGRATIONS: &[Migration] = &[
         ALTER TABLE conversations ADD COLUMN title_custom INTEGER NOT NULL DEFAULT 0;
         ",
     },
+    Migration {
+        version: 10,
+        name: "0010_weather_reactions",
+        sql: "CREATE TABLE weather_reactions (
+            city TEXT PRIMARY KEY,
+            condition TEXT,
+            last_notice INTEGER NOT NULL
+        );",
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> anyhow::Result<()> {

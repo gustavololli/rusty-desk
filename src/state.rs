@@ -373,6 +373,8 @@ pub struct UiChatEntry {
     pub is_user: bool,
     pub text: String,
     pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weather: Option<Box<crate::weather::WeatherReport>>,
 }
 
 impl UiChatEntry {
@@ -381,6 +383,7 @@ impl UiChatEntry {
             is_user: true,
             text: text.into(),
             timestamp: Local::now().format("%H:%M").to_string(),
+            weather: None,
         }
     }
 
@@ -389,6 +392,7 @@ impl UiChatEntry {
             is_user: false,
             text: text.into(),
             timestamp: Local::now().format("%H:%M").to_string(),
+            weather: None,
         }
     }
 }
@@ -1209,6 +1213,7 @@ pub fn build_dual_history(
                         is_user: true,
                         text: text.clone(),
                         timestamp: local_ts,
+                        weather: None,
                     });
                     tech_turns.push(vec![ChatMessage::user(text)]);
                 }
@@ -1223,19 +1228,32 @@ pub fn build_dual_history(
                     .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok());
 
-                if let Some(text) = &m.content {
+                let (content, weather) = if m.kind == MessageKind::Weather {
+                    let weather = m.content.as_deref().and_then(|json| {
+                        serde_json::from_str::<Box<crate::weather::WeatherReport>>(json).ok()
+                    });
+                    let text = weather.as_ref().map_or_else(
+                        || "Pronóstico guardado no disponible.".to_string(),
+                        |report| report.format_message(6),
+                    );
+                    (Some(text), weather)
+                } else {
+                    (m.content.clone(), None)
+                };
+                if let Some(text) = &content {
                     if !text.trim().is_empty() {
                         ui_entries.push(UiChatEntry {
                             is_user: false,
                             text: text.clone(),
                             timestamp: local_ts,
+                            weather,
                         });
                     }
                 }
 
                 let chat_msg = ChatMessage {
                     role: "assistant".to_string(),
-                    content: m.content.clone(),
+                    content,
                     tool_calls,
                     tool_call_id: None,
                     raw_gemini_parts,
@@ -1250,6 +1268,7 @@ pub fn build_dual_history(
                         is_user: false,
                         text: format!("⚠️ {content}"),
                         timestamp: local_ts,
+                        weather: None,
                     });
                 }
                 let tool_msg = ChatMessage::tool_result(call_id, content);

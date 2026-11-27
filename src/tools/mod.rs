@@ -732,15 +732,9 @@ impl ToolEngine {
                 let msg = "Pedido de información del escritorio.".to_string();
                 Ok((msg.clone(), msg, None))
             }
-            "web_search" | "web_fetch" | "get_exchange_rate" => Err(format!(
+            "web_search" | "web_fetch" | "get_exchange_rate" | "get_weather" => Err(format!(
                 "La herramienta '{name}' se ejecuta por el motor externo ya configurado. Si ves esto, el turno no llegó a llamarla."
             )),
-            "get_weather" => {
-                let city = args["city"].as_str().unwrap_or("").trim();
-                let report = crate::weather::fetch_weather_blocking(city)?;
-                let msg = report.format_message();
-                Ok((msg.clone(), msg, Some(AssistantMood::Happy)))
-            }
             other => Err(format!("Herramienta desconocida: {other}")),
         }
     }
@@ -1144,8 +1138,18 @@ fn validate_args(spec: &ToolSpec, args: &Value) -> Result<(), String> {
             crate::music::normalize_audio_url(raw)
                 .map_err(|e| format!("Argumento inválido: {e}"))?;
         }
-        "get_weather" if args["city"].as_str().unwrap_or("").trim().is_empty() => {
-            return Err("Argumento inválido: 'city' no puede estar vacío.".to_string());
+        "get_weather" => {
+            if args
+                .get("city")
+                .is_some_and(|city| !city.is_null() && !city.is_string())
+            {
+                return Err("Argumento inválido: 'city' debe ser un texto.".into());
+            }
+            if args.get("hours").is_some_and(|hours| {
+                !hours.is_null() && !hours.as_u64().is_some_and(|hours| hours <= 24)
+            }) {
+                return Err("Argumento inválido: 'hours' debe ser un entero entre 0 y 24.".into());
+            }
         }
         "update_task" => {
             if args["query"].as_str().unwrap_or("").trim().is_empty()
@@ -1456,6 +1460,19 @@ mod tests {
         assert!(weather
             .iter()
             .any(|tool| tool.function.name == "list_tasks"));
+        let weather_spec = crate::tools::registry::find_spec("get_weather").unwrap();
+        assert!(validate_args(&weather_spec, &json!({})).is_ok());
+        assert!(validate_args(&weather_spec, &json!({"hours": 24})).is_ok());
+        assert!(validate_args(&weather_spec, &json!({"hours": 25})).is_err());
+        for question in [
+            "¿Llevo paraguas?",
+            "¿Cuándo afloja el viento?",
+            "¿Hay polvo en el aire?",
+        ] {
+            assert!(select_tools_for_message(question)
+                .iter()
+                .any(|tool| tool.function.name == "get_weather"));
+        }
         let everything = select_tools_for_message("hola");
         assert_eq!(everything.len(), tool_definitions().len());
         let minutes = validate_args(

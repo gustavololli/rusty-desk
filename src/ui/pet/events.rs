@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::weather::WeatherCondition;
+
 /// Display mode of the rusty-desk window.
 /// All three modes share the exact same logical application state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -45,6 +47,7 @@ pub enum PetEvent {
     UserReturned,
     SystemRecovered,
     OperationSucceeded,
+    WeatherChanged(WeatherCondition),
     SectionEmpty(EmptySection),
 }
 
@@ -84,7 +87,8 @@ impl PetEvent {
             | Self::CuriosityTrigger
             | Self::SectionEmpty(_)
             | Self::LongWorkSession
-            | Self::OperationSucceeded => EventPriority::Low,
+            | Self::OperationSucceeded
+            | Self::WeatherChanged(_) => EventPriority::Low,
         }
     }
 }

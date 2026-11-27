@@ -48,6 +48,27 @@ mod tests {
     }
 
     #[test]
+    fn weather_reuses_existing_animations_without_interrupting_active_reactions() {
+        use crate::weather::WeatherCondition;
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig::default();
+        let wind = PetEvent::WeatherChanged(WeatherCondition::Wind);
+        ctrl.on_event(PetEvent::TaskCompleted, &cfg, AssistantMood::Idle);
+        ctrl.on_event(wind, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Celebrate);
+        let mut ctrl = AnimationController::default();
+        ctrl.on_event(wind, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::WakeUp);
+        let mut ctrl = AnimationController::default();
+        let cfg = PetConfig {
+            reduce_animations: true,
+            ..cfg
+        };
+        ctrl.on_event(wind, &cfg, AssistantMood::Idle);
+        assert_eq!(ctrl.state(), AnimationState::Idle);
+    }
+
+    #[test]
     fn sleep_and_wake_lifecycle() {
         let mut ctrl = AnimationController::default();
         let mut behavior = PetBehavior::new(0.0);

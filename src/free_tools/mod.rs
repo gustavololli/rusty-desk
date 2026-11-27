@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{ExternalToolsConfig, SearchProviderConfig, SearchProviderId};
 use crate::persistence::Database;
+use crate::weather::{WeatherCache, WeatherReport};
 
 use exchange::FrankfurterProvider;
 use fetch::{fetch_url_safe, format_untrusted_fetch_for_llm};
@@ -217,6 +218,7 @@ pub struct FreeToolsEngine {
     client: Client,
     db: Mutex<Database>,
     cache: Mutex<FreeToolsCache>,
+    weather: WeatherCache,
     last_errors: Mutex<HashMap<String, String>>,
     #[cfg(test)]
     custom_search_providers: Mutex<HashMap<String, Arc<dyn SearchProvider>>>,
@@ -240,6 +242,7 @@ impl FreeToolsEngine {
             client,
             db: Mutex::new(db),
             cache: Mutex::new(FreeToolsCache::default()),
+            weather: WeatherCache::default(),
             last_errors: Mutex::new(HashMap::new()),
             #[cfg(test)]
             custom_search_providers: Mutex::new(HashMap::new()),
@@ -625,7 +628,7 @@ impl FreeToolsEngine {
         &self,
         cfg: &ExternalToolsConfig,
         location: &str,
-    ) -> Result<String, FreeToolError> {
+    ) -> Result<WeatherReport, FreeToolError> {
         if !cfg.weather_enabled {
             return Err(FreeToolError::NotConfigured(
                 "La consulta de clima (Open-Meteo) está deshabilitada.".to_string(),
@@ -637,24 +640,10 @@ impl FreeToolsEngine {
                 "Indicá una ciudad o ubicación para consultar el clima.".to_string(),
             ));
         }
-        let cache_key = format!("weather:{}", loc.to_lowercase());
-        if let Ok(mut cache) = self.cache.lock() {
-            if let Some(cached) = cache.get(&cache_key) {
-                return Ok(cached);
-            }
-        }
-        let report = crate::weather::fetch_weather(loc)
+        self.weather
+            .get(&self.client, loc)
             .await
-            .map_err(FreeToolError::ProviderUnavailable)?;
-        let formatted = format!(
-            "{}\nConsultado: {} UTC (Open-Meteo)",
-            report.format_message(),
-            Utc::now().format("%Y-%m-%d %H:%M")
-        );
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(cache_key, formatted.clone(), Duration::from_secs(600));
-        }
-        Ok(formatted)
+            .map_err(FreeToolError::ProviderUnavailable)
     }
 
     pub async fn execute_exchange_rate(

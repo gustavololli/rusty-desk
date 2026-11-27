@@ -280,6 +280,12 @@ pub struct ExternalToolsConfig {
     pub web_fetch_max_chars: usize,
     #[serde(default = "default_true")]
     pub weather_enabled: bool,
+    #[serde(default)]
+    pub weather_city: String,
+    #[serde(default)]
+    pub weather_auto: bool,
+    #[serde(default)]
+    pub weather_dust_threshold: f64,
     #[serde(default = "default_true")]
     pub exchange_enabled: bool,
 }
@@ -313,6 +319,17 @@ fn default_langsearch_config() -> SearchProviderConfig {
     }
 }
 
+impl ExternalToolsConfig {
+    pub fn weather_city(&self) -> &str {
+        let city = self.weather_city.trim();
+        if city.is_empty() {
+            "Buenos Aires"
+        } else {
+            city
+        }
+    }
+}
+
 impl Default for ExternalToolsConfig {
     fn default() -> Self {
         Self {
@@ -324,6 +341,9 @@ impl Default for ExternalToolsConfig {
             web_fetch_enabled: true,
             web_fetch_max_chars: default_fetch_max_chars(),
             weather_enabled: true,
+            weather_city: String::new(),
+            weather_auto: false,
+            weather_dust_threshold: 0.0,
             exchange_enabled: true,
         }
     }
